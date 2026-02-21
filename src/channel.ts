@@ -938,6 +938,7 @@ export const keychatPlugin: ChannelPlugin<ResolvedKeychatAccount> = {
       // Set up inbound message handler
       bridge.setInboundHandler(async (msg: InboundMessage) => {
         try {
+          ctx.log?.info(`[${account.accountId}] ▶ Inbound handler invoked: kind=${msg.event_kind} from=${msg.from_pubkey?.slice(0,16)} to=${msg.to_address?.slice(0,16)} prekey=${msg.is_prekey} event=${msg.event_id?.slice(0,16)}`);
           // Deduplicate events — check in-memory first, then DB
           if (msg.event_id) {
             if (seenEventIds.has(msg.event_id)) {
@@ -1621,9 +1622,12 @@ async function handleEncryptedDM(
   // Signal identity key from the ciphertext and look up the peer directly.
   // This is deterministic and avoids the old brute-force fallback.
   const hasPeerSession = peerNostrPubkey ? peerSessions.has(peerNostrPubkey) : false;
+  ctx.log?.info(`[${accountId}] DEBUG: peerNostrPubkey=${peerNostrPubkey}, hasPeerSession=${hasPeerSession}, is_prekey=${msg.is_prekey}, to_address=${msg.to_address}`);
   if ((!peerNostrPubkey || !hasPeerSession) && msg.is_prekey) {
+    ctx.log?.info(`[${accountId}] Entering PreKey path, encrypted_content length=${msg.encrypted_content?.length}, first40=${msg.encrypted_content?.slice(0, 40)}`);
     try {
       const prekeyInfo = await bridge.parsePrekeySender(msg.encrypted_content);
+      ctx.log?.info(`[${accountId}] parsePrekeySender result: is_prekey=${prekeyInfo.is_prekey}, signal_identity_key=${prekeyInfo.signal_identity_key}`);
       if (prekeyInfo.is_prekey && prekeyInfo.signal_identity_key) {
         const sigKey = prekeyInfo.signal_identity_key;
         ctx.log?.info(`[${accountId}] PreKey message detected — signal identity: ${sigKey}`);
@@ -1708,18 +1712,30 @@ async function handleEncryptedDM(
           await bridge.savePeerMapping(senderNostrId, sigKey, 1, senderName);
           ctx.log?.info(`[${accountId}] ✅ Session established with ${senderNostrId} (signal: ${sigKey})`);
 
-          // After PreKey decrypt, subscribe to any new ratchet-derived receiving addresses
+          // After PreKey decrypt, subscribe to receiving addresses for this new peer.
+          // alice_addrs from decrypt contains ratchet-derived addresses; take only latest MAX_RECEIVING_ADDRESSES.
           try {
-            const { addresses } = await bridge.getReceivingAddresses();
-            if (addresses.length > 0) {
-              const newAddrs = addresses.filter((a) => !addressToPeer.has(a.nostr_pubkey));
+            const aliceAddrs: string[] = decryptResult?.alice_addrs ?? [];
+            if (aliceAddrs.length > 0) {
+              const latest = aliceAddrs.slice(-MAX_RECEIVING_ADDRESSES);
+              const newAddrs = latest.filter((a) => !addressToPeer.has(a));
               if (newAddrs.length > 0) {
-                await bridge.addSubscription(newAddrs.map((a) => a.nostr_pubkey));
+                await bridge.addSubscription(newAddrs);
+                const peerAddrs = peerSubscribedAddresses.get(senderNostrId!) ?? [];
                 for (const a of newAddrs) {
-                  addressToPeer.set(a.nostr_pubkey, senderNostrId!);
-                  try { await bridge.saveAddressMapping(a.nostr_pubkey, senderNostrId!); } catch { /* */ }
+                  addressToPeer.set(a, senderNostrId!);
+                  peerAddrs.push(a);
+                  try { await bridge.saveAddressMapping(a, senderNostrId!); } catch { /* */ }
                 }
-                ctx.log?.info(`[${accountId}] Subscribed to ${newAddrs.length} new receiving address(es) after PreKey hello reply`);
+                // Trim to MAX_RECEIVING_ADDRESSES
+                while (peerAddrs.length > MAX_RECEIVING_ADDRESSES) {
+                  const old = peerAddrs.shift()!;
+                  addressToPeer.delete(old);
+                  try { await bridge.removeSubscription([old]); } catch { /* */ }
+                  try { await bridge.deleteAddressMapping(old); } catch { /* */ }
+                }
+                peerSubscribedAddresses.set(senderNostrId!, peerAddrs);
+                ctx.log?.info(`[${accountId}] Registered ${newAddrs.length} receiving address(es) for new peer ${senderNostrId!.slice(0,16)} (kept ${peerAddrs.length})`);
               }
             }
           } catch { /* best effort */ }
@@ -1761,7 +1777,8 @@ async function handleEncryptedDM(
         }
       }
     } catch (err) {
-      ctx.log?.info(`[${accountId}] PreKey parse/decrypt failed: ${err}`);
+      ctx.log?.error(`[${accountId}] PreKey parse/decrypt FAILED: ${err}`);
+      console.error(`[keychat] PreKey error:`, err);
     }
   }
 
@@ -1832,23 +1849,31 @@ async function handleEncryptedDM(
   const peer_ = actualPeer;
   const { plaintext } = decryptResult;
 
-  // After decrypt, signal-store may have updated alice_addresses (new receiving address).
-  // Re-read from DB and subscribe to any new addresses.
+  // After decrypt, use alice_addrs from decrypt result (per-peer ratchet addresses).
+  // handleReceivingAddressRotation handles the per-message new_receiving_address from send;
+  // for decrypt, we use alice_addrs which contains the current peer's ratchet addresses.
   try {
-    const { addresses } = await bridge.getReceivingAddresses();
-    if (addresses.length > 0) {
-      const latest = addresses.slice(-1 * MAX_RECEIVING_ADDRESSES);
-      const newAddrs = latest.filter((a) => !addressToPeer.has(a.nostr_pubkey));
+    const aliceAddrs: string[] = (decryptResult as any)?.alice_addrs ?? [];
+    if (aliceAddrs.length > 0) {
+      const latest = aliceAddrs.slice(-MAX_RECEIVING_ADDRESSES);
+      const newAddrs = latest.filter((a) => !addressToPeer.has(a));
       if (newAddrs.length > 0) {
-        await bridge.addSubscription(newAddrs.map((a) => a.nostr_pubkey));
+        await bridge.addSubscription(newAddrs);
+        const peerAddrs = peerSubscribedAddresses.get(peerNostrPubkey) ?? [];
         for (const a of newAddrs) {
-          addressToPeer.set(a.nostr_pubkey, peerNostrPubkey);
-          try {
-            await bridge.saveAddressMapping(a.nostr_pubkey, peerNostrPubkey);
-          } catch { /* best effort */ }
+          addressToPeer.set(a, peerNostrPubkey);
+          peerAddrs.push(a);
+          try { await bridge.saveAddressMapping(a, peerNostrPubkey); } catch { /* */ }
         }
+        while (peerAddrs.length > MAX_RECEIVING_ADDRESSES) {
+          const old = peerAddrs.shift()!;
+          addressToPeer.delete(old);
+          try { await bridge.removeSubscription([old]); } catch { /* */ }
+          try { await bridge.deleteAddressMapping(old); } catch { /* */ }
+        }
+        peerSubscribedAddresses.set(peerNostrPubkey, peerAddrs);
         ctx.log?.info(
-          `[${accountId}] Subscribed to ${newAddrs.length} new receiving address(es) after decrypt (peer: ${peerNostrPubkey})`,
+          `[${accountId}] Updated ${newAddrs.length} receiving address(es) after decrypt (peer: ${peerNostrPubkey.slice(0,16)}, kept ${peerAddrs.length})`,
         );
       }
     }

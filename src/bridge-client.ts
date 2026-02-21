@@ -132,6 +132,7 @@ export class KeychatBridgeClient {
 
         // Check if this is an unsolicited push event (id=0, has "event" field)
         if (parsed.id === 0 && parsed.event === "inbound_message" && parsed.data) {
+          console.log(`[keychat-bridge] Inbound push received: event_kind=${(parsed.data as any).event_kind} from=${(parsed.data as any).from_pubkey?.slice(0,16)} to=${(parsed.data as any).to_address?.slice(0,16)} prekey=${(parsed.data as any).is_prekey}`);
           if (this.onInboundMessage) {
             this.onInboundMessage(parsed.data as InboundMessage);
           } else {

@@ -892,23 +892,28 @@ impl BridgeState {
             return Err(anyhow::anyhow!("Empty ciphertext"));
         }
 
-        // Check if this is a PreKey message (type byte = 3)
-        let is_prekey = ciphertext_bytes[0] == 3;
-        if !is_prekey {
-            return Ok(serde_json::json!({
-                "is_prekey": false,
-            }));
-        }
+        // Try to parse as PreKeySignalMessage (same approach as Keychat app: try_from)
+        let prekey_msg = match signal_store::libsignal_protocol::PreKeySignalMessage::try_from(ciphertext_bytes.as_slice()) {
+            Ok(msg) => msg,
+            Err(_) => {
+                log::info!("parse_prekey_sender: not a PreKeySignalMessage (len={})", ciphertext_bytes.len());
+                return Ok(serde_json::json!({
+                    "is_prekey": false,
+                }));
+            }
+        };
 
-        // Parse PreKeySignalMessage to extract identity key
-        let prekey_msg = signal_store::libsignal_protocol::PreKeySignalMessage::try_from(ciphertext_bytes.as_slice())?;
         let identity_key = prekey_msg.identity_key();
         let identity_key_bytes = identity_key.serialize();
         let identity_key_hex = hex::encode(&identity_key_bytes);
+        let signed_pre_key_id = prekey_msg.signed_pre_key_id();
 
+        let spk_id: u32 = signed_pre_key_id.into();
+        log::info!("parse_prekey_sender: PreKey detected, identity_key={}, signed_pre_key_id={}", &identity_key_hex[..16], spk_id);
         Ok(serde_json::json!({
             "is_prekey": true,
             "signal_identity_key": identity_key_hex,
+            "signed_pre_key_id": spk_id,
         }))
     }
 

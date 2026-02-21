@@ -9,6 +9,30 @@
   "configSchema": {
     "type": "object",
     "additionalProperties": false,
-    "properties": {}
+    "properties": {
+      "name": { "type": "string", "description": "Display name for this account" },
+      "enabled": { "type": "boolean", "description": "Enable/disable the Keychat channel" },
+      "markdown": { "type": "object", "description": "Markdown formatting overrides" },
+      "mnemonic": { "type": "string", "description": "Identity mnemonic (auto-generated, stored in keychain)" },
+      "publicKey": { "type": "string", "description": "Derived hex public key (read-only)" },
+      "npub": { "type": "string", "description": "Derived bech32 npub (read-only)" },
+      "relays": {
+        "type": "array",
+        "items": { "type": "string" },
+        "description": "Nostr relay WebSocket URLs"
+      },
+      "dmPolicy": {
+        "type": "string",
+        "enum": ["pairing", "allowlist", "open", "disabled"],
+        "description": "DM access policy"
+      },
+      "allowFrom": {
+        "type": "array",
+        "items": { "type": ["string", "number"] },
+        "description": "Allowed sender pubkeys (npub or hex)"
+      },
+      "lightningAddress": { "type": "string", "description": "Lightning address for receiving payments" },
+      "nwcUri": { "type": "string", "description": "Nostr Wallet Connect URI" }
+    }
   }
 }

@@ -6,7 +6,7 @@
  * Linux: Uses `secret-tool` (libsecret / GNOME Keyring)
  */
 
-import { execSync } from "node:child_process";
+import { execFileSync } from "node:child_process";
 
 const SERVICE = "openclaw-keychat";
 
@@ -14,18 +14,14 @@ export async function storeMnemonic(accountId: string, mnemonic: string): Promis
   const key = `mnemonic-${accountId}`;
   try {
     if (process.platform === "darwin") {
-      // macOS Keychain
-      execSync(
-        `security add-generic-password -a "${key}" -s "${SERVICE}" -w "${mnemonic}" -U`,
-        { stdio: "pipe" },
-      );
+      execFileSync("security", [
+        "add-generic-password", "-a", key, "-s", SERVICE, "-w", mnemonic, "-U",
+      ], { stdio: "pipe" });
       return true;
     } else if (process.platform === "linux") {
-      // Linux secret-service
-      execSync(
-        `echo -n "${mnemonic}" | secret-tool store --label="${SERVICE}" service "${SERVICE}" account "${key}"`,
-        { stdio: "pipe" },
-      );
+      execFileSync("secret-tool", [
+        "store", "--label", SERVICE, "service", SERVICE, "account", key,
+      ], { stdio: "pipe", input: mnemonic });
       return true;
     }
   } catch {
@@ -38,16 +34,14 @@ export async function retrieveMnemonic(accountId: string): Promise<string | null
   const key = `mnemonic-${accountId}`;
   try {
     if (process.platform === "darwin") {
-      const result = execSync(
-        `security find-generic-password -a "${key}" -s "${SERVICE}" -w`,
-        { stdio: "pipe" },
-      );
+      const result = execFileSync("security", [
+        "find-generic-password", "-a", key, "-s", SERVICE, "-w",
+      ], { stdio: "pipe" });
       return result.toString().trim();
     } else if (process.platform === "linux") {
-      const result = execSync(
-        `secret-tool lookup service "${SERVICE}" account "${key}"`,
-        { stdio: "pipe" },
-      );
+      const result = execFileSync("secret-tool", [
+        "lookup", "service", SERVICE, "account", key,
+      ], { stdio: "pipe" });
       return result.toString().trim();
     }
   } catch {
@@ -60,16 +54,14 @@ export async function deleteMnemonic(accountId: string): Promise<boolean> {
   const key = `mnemonic-${accountId}`;
   try {
     if (process.platform === "darwin") {
-      execSync(
-        `security delete-generic-password -a "${key}" -s "${SERVICE}"`,
-        { stdio: "pipe" },
-      );
+      execFileSync("security", [
+        "delete-generic-password", "-a", key, "-s", SERVICE,
+      ], { stdio: "pipe" });
       return true;
     } else if (process.platform === "linux") {
-      execSync(
-        `secret-tool clear service "${SERVICE}" account "${key}"`,
-        { stdio: "pipe" },
-      );
+      execFileSync("secret-tool", [
+        "clear", "service", SERVICE, "account", key,
+      ], { stdio: "pipe" });
       return true;
     }
   } catch {

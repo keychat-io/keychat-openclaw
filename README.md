@@ -11,7 +11,7 @@ Your agent becomes a full Keychat citizen: it can receive friend requests, estab
 ## Quick Start
 
 ```bash
-openclaw plugins install @keychat-io/keychat-openclaw
+openclaw plugins install @keychat-io/keychat
 ```
 
 That's it. The plugin auto-downloads the pre-compiled binary for your platform, enables itself, and your agent gets a Keychat identity on next gateway restart.

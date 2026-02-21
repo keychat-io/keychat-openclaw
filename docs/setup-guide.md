@@ -5,37 +5,46 @@ Step-by-step instructions to get your OpenClaw agent communicating via Keychat.
 ## Prerequisites
 
 - **macOS or Linux** (arm64 or x86_64)
-- **Rust toolchain**: Install via [rustup](https://rustup.rs/):
-  ```bash
-  curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-  ```
-- **Node.js 20+**: Required for OpenClaw
+- **Node.js 20+**
 - **OpenClaw**: Installed and configured (`openclaw gateway status` should work)
 
-## Step 1: Build the Bridge Binary
+## Step 1: Install the Plugin
 
 ```bash
-cd ~/.openclaw/workspace/openclaw/extensions/keychat/bridge
-cargo build --release
+openclaw plugins install @keychat-io/keychat
 ```
 
-This produces `target/release/keychat-for-agent`. Build time: ~2-5 minutes on first run.
+This auto-downloads the pre-compiled Rust sidecar binary for your platform. No Rust toolchain needed.
+
+> **Building from source** (optional): If no pre-compiled binary is available for your platform, install [Rust](https://rustup.rs/) and run `cd bridge && cargo build --release`.
 
 ## Step 2: Configure OpenClaw
 
-Edit `~/.openclaw/config.yaml`:
+Edit `~/.openclaw/openclaw.json` and add the Keychat channel config:
 
-```yaml
-channels:
-  keychat:
-    enabled: true
-    relays:
-      - wss://relay.keychat.io
-      - wss://relay.damus.io
-    dmPolicy: pairing  # or: allowlist, open, disabled
-    # allowFrom:       # optional: restrict to specific pubkeys
-    #   - npub1abc...
+```json
+{
+  "channels": {
+    "keychat": {
+      "enabled": true,
+      "relays": [
+        "wss://relay.keychat.io",
+        "wss://relay.damus.io"
+      ],
+      "dmPolicy": "pairing"
+    }
+  }
+}
 ```
+
+### DM Policies
+
+| Policy | Description |
+|--------|-------------|
+| `pairing` | New contacts require owner approval (default) |
+| `allowlist` | Only pubkeys in `allowFrom` can communicate |
+| `open` | Anyone can message the agent |
+| `disabled` | No inbound messages accepted |
 
 ## Step 3: Restart the Gateway
 
@@ -43,7 +52,8 @@ channels:
 openclaw gateway restart
 ```
 
-Watch the logs for:
+Watch the logs for your agent's Keychat ID:
+
 ```
 ═══════════════════════════════════════════════════
   🔑 Agent Keychat ID (scan with Keychat app):
@@ -55,11 +65,13 @@ Watch the logs for:
 ═══════════════════════════════════════════════════
 ```
 
+A QR code is also saved to `~/.openclaw/keychat-qr.png`.
+
 ## Step 4: Connect with Keychat App
 
 1. Open the [Keychat app](https://www.keychat.io/) on your phone
-2. Tap "Add Contact"
-3. Scan the QR code at `~/.openclaw/keychat-qr.png`, or paste the npub
+2. Tap **Add Contact**
+3. Scan the QR code at `~/.openclaw/keychat-qr.png`, or paste the npub / contact URL
 4. Send a friend request
 5. If `dmPolicy` is `pairing`, approve the request:
    ```bash
@@ -72,16 +84,41 @@ Send a message from the Keychat app — your agent will respond with E2E encrypt
 
 ## Identity Management
 
-- **First run**: Agent auto-generates a mnemonic and stores it in your system keychain
-- **Backup**: The mnemonic is your agent's identity. Export it from keychain if needed
-- **Restore**: Set `mnemonic` in config to restore an existing identity on a new machine
-- **Key files**: Signal DB at `~/.openclaw/keychat-signal-default.db`
+- **First run**: Agent auto-generates a mnemonic and stores it in your system keychain (macOS Keychain / Linux libsecret)
+- **Backup**: Export the mnemonic from your keychain if needed
+- **Restore**: Set `mnemonic` in the channel config to restore an existing identity on a new machine
+- **Signal DB**: Stored at `~/.openclaw/keychat-signal-default.db` — **do not delete** (destroys all encrypted sessions)
 
 ## Verifying the Setup
 
-Check the agent's status:
 ```bash
 openclaw gateway status
 ```
 
 The Keychat channel should show as running with the agent's npub.
+
+## Lightning Wallet (Optional)
+
+Add a Lightning address for receiving payments:
+
+```json
+{
+  "channels": {
+    "keychat": {
+      "lightningAddress": "user@walletofsatoshi.com"
+    }
+  }
+}
+```
+
+For full wallet access (balance, payments), configure [Nostr Wallet Connect](https://github.com/nostr-protocol/nips/blob/master/47.md):
+
+```json
+{
+  "channels": {
+    "keychat": {
+      "nwcUri": "nostr+walletconnect://pubkey?relay=wss://...&secret=..."
+    }
+  }
+}
+```

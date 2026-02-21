@@ -552,8 +552,8 @@ impl NostrTransport {
         let sender_keys = &account.keys;
         let receiver = recipient_pubkey_hex.parse::<PublicKey>()?;
 
-        // Create rumor (kind:14 per NIP-59 for DMs)
-        let rumor = EventBuilder::new(Kind::Custom(14), content.to_string())
+        // Create rumor (kind:1059 to match Keychat app convention — NOT standard NIP-59 kind:14)
+        let rumor = EventBuilder::new(Kind::GiftWrap, content.to_string())
             .tags(vec![Tag::public_key(receiver)])
             .build(sender_keys.public_key());
 

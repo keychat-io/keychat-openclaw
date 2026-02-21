@@ -355,8 +355,9 @@ export const keychatPlugin: ChannelPlugin<ResolvedKeychatAccount> = {
       const message = core.channel.text.convertMarkdownTables(text ?? "", tableMode);
       const normalizedTo = normalizePubkey(to);
 
-      // Check if we have a session with this peer
-      const hasSession = peerSessions.has(normalizedTo);
+      // Check if we have a session with this peer (placeholder mappings with empty signalPubkey don't count)
+      const existingPeer = peerSessions.get(normalizedTo);
+      const hasSession = !!(existingPeer && existingPeer.signalPubkey);
       if (!hasSession) {
         // No session — need to send hello first and queue the message
         console.log(`[keychat] No session with ${normalizedTo}, initiating hello...`);
@@ -734,6 +735,8 @@ export const keychatPlugin: ChannelPlugin<ResolvedKeychatAccount> = {
         if (mappings.length > 0) {
           ctx.log?.info(`[${account.accountId}] Restored ${mappings.length} peer mapping(s) from DB`);
           for (const m of mappings) {
+            // Skip placeholder rows created by outgoing hello before reply arrives
+            if (!m.signal_pubkey) continue;
             peerSessions.set(m.nostr_pubkey, {
               signalPubkey: m.signal_pubkey,
               deviceId: m.device_id,
@@ -899,6 +902,7 @@ export const keychatPlugin: ChannelPlugin<ResolvedKeychatAccount> = {
           // Restore peer mappings
           const { mappings } = await bridge.getPeerMappings();
           for (const m of mappings) {
+            if (!m.signal_pubkey) continue;
             peerSessions.set(m.nostr_pubkey, {
               signalPubkey: m.signal_pubkey,
               deviceId: m.device_id,
@@ -1616,7 +1620,8 @@ async function handleEncryptedDM(
   // If we still can't identify the peer, try the PreKey path: extract the
   // Signal identity key from the ciphertext and look up the peer directly.
   // This is deterministic and avoids the old brute-force fallback.
-  if (!peerNostrPubkey && msg.is_prekey) {
+  const hasPeerSession = peerNostrPubkey ? peerSessions.has(peerNostrPubkey) : false;
+  if ((!peerNostrPubkey || !hasPeerSession) && msg.is_prekey) {
     try {
       const prekeyInfo = await bridge.parsePrekeySender(msg.encrypted_content);
       if (prekeyInfo.is_prekey && prekeyInfo.signal_identity_key) {
@@ -1646,7 +1651,7 @@ async function handleEncryptedDM(
 
         // Strategy 3: This is a new peer replying to our hello — decrypt first,
         // then identify via PrekeyMessageModel.nostr_id or helloSentTo set
-        if (!peerNostrPubkey) {
+        if (!peerNostrPubkey || !peerSessions.has(peerNostrPubkey)) {
           ctx.log?.info(`[${accountId}] PreKey from unknown signal key ${sigKey} — attempting decrypt to identify sender`);
 
           const decryptResult = await bridge.decryptMessage(sigKey, msg.encrypted_content, true);
@@ -1663,6 +1668,12 @@ async function handleEncryptedDM(
               ctx.log?.info(`[${accountId}] PreKey sender identified via PrekeyMessageModel: nostr_id=${senderNostrId}`);
             }
           } catch { /* not a PrekeyMessageModel */ }
+
+          // Fallback: use peerNostrPubkey from addressToPeer (onetimekey mapping)
+          if (!senderNostrId && peerNostrPubkey) {
+            senderNostrId = peerNostrPubkey;
+            ctx.log?.info(`[${accountId}] PreKey sender identified via onetimekey addressToPeer mapping: ${senderNostrId}`);
+          }
 
           // Fallback: if only one pending hello, assume it's the responder
           if (!senderNostrId && helloSentTo.size === 1) {
@@ -1724,10 +1735,20 @@ async function handleEncryptedDM(
           let displayText = plaintext;
           try {
             const parsed = JSON.parse(plaintext);
-            if (parsed && typeof parsed.msg === "string") {
+            // PrekeyMessageModel uses 'message' field; KeychatMessage uses 'msg'
+            if (parsed && typeof parsed.message === "string") {
+              displayText = parsed.message;
+              // The message field may contain a nested KeychatMessage JSON
+              try {
+                const inner = JSON.parse(parsed.message);
+                if (inner && typeof inner.msg === "string") {
+                  displayText = inner.msg;
+                }
+              } catch { /* not nested JSON */ }
+            } else if (parsed && typeof parsed.msg === "string") {
               displayText = parsed.msg;
             }
-            // If this is a hello greeting (PrekeyMessageModel.message), don't dispatch to agent
+            // If this is a PrekeyMessageModel (hello reply wrapper), don't dispatch to agent
             if (parsed?.nostrId && parsed?.signalId) {
               ctx.log?.info(`[${accountId}] Hello reply from ${senderNostrId}: ${displayText.slice(0, 80)}`);
               return; // Protocol overhead — don't dispatch

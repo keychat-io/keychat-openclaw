@@ -660,6 +660,12 @@ impl BridgeState {
                 if let Ok(mappings) = signal.get_all_peer_mappings_full().await {
                     for m in mappings {
                         if m.0 == to_str {
+                            if m.1.is_empty() {
+                                // Placeholder mapping (hello sent, no reply yet)
+                                log::info!("Peer {} has placeholder mapping (no signal pubkey yet), waiting for hello reply", to_str);
+                                local_signal_pubkey = m.4.filter(|s| !s.is_empty());
+                                break;
+                            }
                             log::info!("Loaded peer {} from DB peer_mapping (signal: {}, local_signal: {:?})", to_str, m.1, m.4);
                             let restored_peer = PeerSession {
                                 nostr_pubkey: m.0.clone(),
@@ -698,6 +704,10 @@ impl BridgeState {
                 .unwrap_or(1) as u32;
             (to_str.clone(), device_id, to_str.clone())
         };
+
+        if signal_pubkey.is_empty() {
+            anyhow::bail!("No Signal session with peer {} yet (missing peer signal pubkey)", to_str);
+        }
 
         let signal = self
             .signal
@@ -943,41 +953,67 @@ impl BridgeState {
             &ciphertext_b64,
         )?;
 
-        // Look up local signal key for this peer (to use the correct ephemeral store)
-        let local_signal_pubkey: Option<String> = if let Ok(mappings) = signal.get_all_peer_mappings_full().await {
-            mappings.iter()
-                .find(|m| m.1 == from_pubkey)  // match by peer's signal pubkey
-                .and_then(|m| m.4.clone())
-                .filter(|s| !s.is_empty())
-        } else {
-            None
-        };
+        // Look up local signal key for this peer (to use the correct ephemeral store).
+        // For hello-reply PreKey messages from unknown peers, there may be no remote signal mapping yet;
+        // in that case we later try all known local ephemeral stores as a fallback.
+        let mappings = signal.get_all_peer_mappings_full().await.unwrap_or_default();
+        let local_signal_pubkey: Option<String> = mappings
+            .iter()
+            .find(|m| m.1 == from_pubkey)
+            .and_then(|m| m.4.clone())
+            .filter(|s| !s.is_empty());
 
         log::info!("decrypt_message: from={}, is_prekey={}, device_id={}, ciphertext_len={}, local_store={:?}",
             from_pubkey, is_prekey, device_id, ciphertext_bytes.len(),
             local_signal_pubkey.as_ref().map(|s| &s[..16.min(s.len())]));
 
-        let result = match signal
-            .decrypt_with_store(account, local_signal_pubkey.as_deref(), &from_pubkey, &ciphertext_bytes, device_id, room_id, is_prekey)
-            .await {
+        let result = if let Some(ref local_store_key) = local_signal_pubkey {
+            match signal
+                .decrypt_with_store(account, Some(local_store_key), &from_pubkey, &ciphertext_bytes, device_id, room_id, is_prekey)
+                .await
+            {
                 Ok(r) => r,
                 Err(e) => {
-                    // If ephemeral store failed, try account's default store as fallback
-                    if local_signal_pubkey.is_some() {
-                        log::warn!("Ephemeral store decrypt failed, trying account default store: {}", e);
-                        match signal.decrypt(account, &from_pubkey, &ciphertext_bytes, device_id, room_id, is_prekey).await {
-                            Ok(r) => r,
-                            Err(e2) => {
-                                log::error!("decrypt_message FAILED for {} (both stores): ephemeral={}, default={}", from_pubkey, e, e2);
-                                return Err(e2);
-                            }
-                        }
-                    } else {
-                        log::error!("decrypt_message FAILED for {}: {}", from_pubkey, e);
-                        return Err(e);
-                    }
+                    log::warn!("Ephemeral store decrypt failed, trying account default store: {}", e);
+                    signal.decrypt(account, &from_pubkey, &ciphertext_bytes, device_id, room_id, is_prekey).await?
                 }
-            };
+            }
+        } else if is_prekey {
+            // Unknown prekey sender (common for hello reply): try each saved local ephemeral store.
+            let mut tried = 0usize;
+            let mut local_candidates: Vec<String> = mappings
+                .iter()
+                .filter_map(|m| m.4.clone())
+                .filter(|s| !s.is_empty())
+                .collect();
+            local_candidates.sort();
+            local_candidates.dedup();
+
+            let mut decrypted: Option<crate::signal::DecryptResult> = None;
+            for candidate in &local_candidates {
+                tried += 1;
+                match signal
+                    .decrypt_with_store(account, Some(candidate), &from_pubkey, &ciphertext_bytes, device_id, room_id, true)
+                    .await
+                {
+                    Ok(r) => {
+                        log::info!("PreKey decrypt succeeded with fallback local store {}", &candidate[..16.min(candidate.len())]);
+                        decrypted = Some(r);
+                        break;
+                    }
+                    Err(_) => continue,
+                }
+            }
+
+            if let Some(r) = decrypted {
+                r
+            } else {
+                log::warn!("PreKey decrypt failed with {} fallback local store(s); trying default store", tried);
+                signal.decrypt(account, &from_pubkey, &ciphertext_bytes, device_id, room_id, is_prekey).await?
+            }
+        } else {
+            signal.decrypt(account, &from_pubkey, &ciphertext_bytes, device_id, room_id, is_prekey).await?
+        };
 
         let plaintext = String::from_utf8(result.plaintext)?;
 

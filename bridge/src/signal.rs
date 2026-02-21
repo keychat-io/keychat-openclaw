@@ -680,7 +680,34 @@ impl SignalManager {
         device_id: u32,
         name: &str,
     ) -> Result<()> {
-        self.save_peer_mapping_full(nostr_pubkey, signal_pubkey, device_id, name, None, None).await
+        // Preserve any previously saved local (ephemeral) Signal keypair for this peer.
+        // This avoids wiping the local store mapping when TS updates only remote metadata.
+        let existing = signal_store::sqlx::query(
+            "SELECT local_signal_pubkey, local_signal_privkey FROM peer_mapping WHERE nostr_pubkey = ?"
+        )
+        .bind(nostr_pubkey)
+        .fetch_optional(self.pool.database())
+        .await?;
+
+        let (local_pk, local_sk) = if let Some(row) = existing {
+            use signal_store::sqlx::Row;
+            (
+                row.try_get::<String, _>(0).ok().filter(|s| !s.is_empty()),
+                row.try_get::<String, _>(1).ok().filter(|s| !s.is_empty()),
+            )
+        } else {
+            (None, None)
+        };
+
+        self.save_peer_mapping_full(
+            nostr_pubkey,
+            signal_pubkey,
+            device_id,
+            name,
+            local_pk.as_deref(),
+            local_sk.as_deref(),
+        )
+        .await
     }
 
     /// Save peer mapping with optional local (ephemeral) Signal keypair.

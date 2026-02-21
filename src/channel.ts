@@ -699,29 +699,35 @@ export const keychatPlugin: ChannelPlugin<ResolvedKeychatAccount> = {
       );
 
       // 6. Log the agent's Keychat ID for the owner
+      // Generate QR code (best-effort)
+      let qrSaved = false;
+      try {
+        const QRCode = await import("qrcode");
+        await QRCode.toFile(qrPath, contactUrl, { width: 256 });
+        qrSaved = true;
+      } catch { /* qrcode not installed, skip */ }
+
       ctx.log?.info(`\n` +
         `═══════════════════════════════════════════════════\n` +
-        `  🔑 Agent Keychat ID (scan with Keychat app):\n` +
+        `  🔑 Agent Keychat ID:\n` +
         `\n` +
         `  ${info.pubkey_npub}\n` +
         `\n` +
-        `  Add contact link:\n` +
-        `  https://www.keychat.io/u/?k=${info.pubkey_npub}\n` +
+        `  📱 Add contact (tap or scan):\n` +
+        `  ${contactUrl}\n` +
+        (qrSaved ? `\n  🖼️  QR code: ${qrPath}\n` : ``) +
         `═══════════════════════════════════════════════════\n`,
       );
 
-      // Generate QR code (best-effort)
-      try {
-        const QRCode = await import("qrcode");
-        const qrPath = join(process.env.HOME || "~", ".openclaw", "keychat-qr.png");
-        await QRCode.toFile(qrPath, `https://www.keychat.io/u/?k=${info.pubkey_npub}`, { width: 256 });
-        ctx.log?.info(`[${account.accountId}] QR code saved to ${qrPath}`);
-      } catch { /* qrcode not installed, skip */ }
+      const contactUrl = `https://www.keychat.io/u/?k=${info.pubkey_npub}`;
+      const qrPath = join(process.env.HOME || "~", ".openclaw", "keychat-qr.png");
 
       ctx.setStatus({
         accountId: account.accountId,
         publicKey: info.pubkey_hex,
         npub: info.pubkey_npub,
+        contactUrl,
+        qrCodePath: qrPath,
         running: true,
         configured: true,
         lastStartAt: new Date().toISOString(),

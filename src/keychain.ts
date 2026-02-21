@@ -1,0 +1,79 @@
+/**
+ * Secure mnemonic storage using system keychain.
+ * Falls back to config file if keychain is unavailable.
+ *
+ * macOS: Uses `security` CLI (Keychain Access)
+ * Linux: Uses `secret-tool` (libsecret / GNOME Keyring)
+ */
+
+import { execSync } from "node:child_process";
+
+const SERVICE = "openclaw-keychat";
+
+export async function storeMnemonic(accountId: string, mnemonic: string): Promise<boolean> {
+  const key = `mnemonic-${accountId}`;
+  try {
+    if (process.platform === "darwin") {
+      // macOS Keychain
+      execSync(
+        `security add-generic-password -a "${key}" -s "${SERVICE}" -w "${mnemonic}" -U`,
+        { stdio: "pipe" },
+      );
+      return true;
+    } else if (process.platform === "linux") {
+      // Linux secret-service
+      execSync(
+        `echo -n "${mnemonic}" | secret-tool store --label="${SERVICE}" service "${SERVICE}" account "${key}"`,
+        { stdio: "pipe" },
+      );
+      return true;
+    }
+  } catch {
+    // Keychain not available
+  }
+  return false;
+}
+
+export async function retrieveMnemonic(accountId: string): Promise<string | null> {
+  const key = `mnemonic-${accountId}`;
+  try {
+    if (process.platform === "darwin") {
+      const result = execSync(
+        `security find-generic-password -a "${key}" -s "${SERVICE}" -w`,
+        { stdio: "pipe" },
+      );
+      return result.toString().trim();
+    } else if (process.platform === "linux") {
+      const result = execSync(
+        `secret-tool lookup service "${SERVICE}" account "${key}"`,
+        { stdio: "pipe" },
+      );
+      return result.toString().trim();
+    }
+  } catch {
+    // Not found or keychain unavailable
+  }
+  return null;
+}
+
+export async function deleteMnemonic(accountId: string): Promise<boolean> {
+  const key = `mnemonic-${accountId}`;
+  try {
+    if (process.platform === "darwin") {
+      execSync(
+        `security delete-generic-password -a "${key}" -s "${SERVICE}"`,
+        { stdio: "pipe" },
+      );
+      return true;
+    } else if (process.platform === "linux") {
+      execSync(
+        `secret-tool clear service "${SERVICE}" account "${key}"`,
+        { stdio: "pipe" },
+      );
+      return true;
+    }
+  } catch {
+    // Not found
+  }
+  return false;
+}

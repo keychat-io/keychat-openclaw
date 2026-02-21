@@ -1,0 +1,33 @@
+{
+  "name": "@keychat-io/keychat-openclaw",
+  "version": "2026.2.20",
+  "description": "Keychat — E2E encrypted chat + Lightning wallet for OpenClaw agents",
+  "license": "AGPL-3.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/keychat-io/keychat-openclaw.git"
+  },
+  "type": "module",
+  "scripts": {
+    "postinstall": "node scripts/postinstall.mjs"
+  },
+  "dependencies": {
+    "@nostr-dev-kit/ndk": "^3.0.0",
+    "qrcode": "^1.5.4",
+    "zod": "^4.3.6"
+  },
+  "openclaw": {
+    "extensions": [
+      "./index.ts"
+    ],
+    "channel": {
+      "id": "keychat",
+      "label": "Keychat",
+      "selectionLabel": "Keychat (E2E Encrypted)",
+      "docsPath": "/channels/keychat",
+      "docsLabel": "keychat",
+      "blurb": "Sovereign identity + E2E encrypted chat via Signal Protocol over Nostr relays.",
+      "order": 56
+    }
+  }
+}

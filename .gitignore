@@ -1,0 +1,8 @@
+bridge/target/
+node_modules/
+package-lock.json
+*.db
+*.db-journal
+bridge_err.log
+*.log
+.DS_Store

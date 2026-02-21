@@ -729,8 +729,14 @@ export const keychatPlugin: ChannelPlugin<ResolvedKeychatAccount> = {
         const execFileAsync = promisify(execFile);
         await execFileAsync("openclaw", [
           "system", "event",
-          "--text", `🔑 Keychat channel is ready!\n\nYour agent's Keychat ID: ${info.pubkey_npub}\n\nAdd contact: ${contactUrl}` +
-            (qrSaved ? `\n\nQR code saved to: ${qrPath}` : ``),
+          "--text", `[Keychat Plugin] Channel is ready. Send this to the owner:\n` +
+            `🔑 Keychat ID: ${info.pubkey_npub}\n` +
+            `📱 Add contact: ${contactUrl}\n` +
+            (qrSaved
+              ? `🖼️ QR code image: ${qrPath}\n` +
+                `On webchat/desktop: send the QR image inline (use message tool with media="${qrPath}").\n` +
+                `On mobile (Telegram/Discord): the clickable link above is sufficient.`
+              : `No QR code generated (qrcode module not installed).`),
           "--mode", "now",
         ], { timeout: 10_000 });
       } catch {

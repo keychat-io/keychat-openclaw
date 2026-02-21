@@ -699,6 +699,9 @@ export const keychatPlugin: ChannelPlugin<ResolvedKeychatAccount> = {
       );
 
       // 6. Log the agent's Keychat ID for the owner
+      const contactUrl = `https://www.keychat.io/u/?k=${info.pubkey_npub}`;
+      const qrPath = join(process.env.HOME || "~", ".openclaw", "keychat-qr.png");
+
       // Generate QR code (best-effort)
       let qrSaved = false;
       try {
@@ -719,8 +722,21 @@ export const keychatPlugin: ChannelPlugin<ResolvedKeychatAccount> = {
         `═══════════════════════════════════════════════════\n`,
       );
 
-      const contactUrl = `https://www.keychat.io/u/?k=${info.pubkey_npub}`;
-      const qrPath = join(process.env.HOME || "~", ".openclaw", "keychat-qr.png");
+      // Notify agent so it can relay the link to the owner on any active channel
+      try {
+        const { execFile } = await import("node:child_process");
+        const { promisify } = await import("node:util");
+        const execFileAsync = promisify(execFile);
+        await execFileAsync("openclaw", [
+          "system", "event",
+          "--text", `🔑 Keychat channel is ready!\n\nYour agent's Keychat ID: ${info.pubkey_npub}\n\nAdd contact: ${contactUrl}` +
+            (qrSaved ? `\n\nQR code saved to: ${qrPath}` : ``),
+          "--mode", "now",
+        ], { timeout: 10_000 });
+      } catch {
+        // Best-effort: if openclaw CLI not available or event fails, just log
+        ctx.log?.warn?.(`[${account.accountId}] Failed to send system event notification`);
+      }
 
       ctx.setStatus({
         accountId: account.accountId,

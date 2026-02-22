@@ -34,6 +34,12 @@ jobs:
       - name: Install protoc
         uses: arduino/setup-protoc@v3
 
+      - name: Verify protoc
+        run: |
+          which protoc
+          protoc --version
+          echo "PROTOC=$(which protoc)" >> $GITHUB_ENV
+
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:

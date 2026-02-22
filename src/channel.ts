@@ -212,24 +212,40 @@ interface PeerSession {
   nostrPubkey: string;
 }
 
-// nostrPubkey → PeerSession
-const peerSessions = new Map<string, PeerSession>();
-// toAddress → nostrPubkey (reverse lookup for inbound kind:4 messages)
-const addressToPeer = new Map<string, string>();
-// Event deduplication — track seen event IDs (max 1000, LRU-style)
-const seenEventIds = new Set<string>();
+// Per-account maps (keyed by accountId)
+const peerSessionsByAccount = new Map<string, Map<string, PeerSession>>();
+const addressToPeerByAccount = new Map<string, Map<string, string>>();
+const seenEventIdsByAccount = new Map<string, Set<string>>();
+
+// Helpers to get per-account maps (auto-create on first access)
+function getPeerSessions(accountId: string): Map<string, PeerSession> {
+  let m = peerSessionsByAccount.get(accountId);
+  if (!m) { m = new Map(); peerSessionsByAccount.set(accountId, m); }
+  return m;
+}
+function getAddressToPeer(accountId: string): Map<string, string> {
+  let m = addressToPeerByAccount.get(accountId);
+  if (!m) { m = new Map(); addressToPeerByAccount.set(accountId, m); }
+  return m;
+}
+function getSeenEventIds(accountId: string): Set<string> {
+  let s = seenEventIdsByAccount.get(accountId);
+  if (!s) { s = new Set(); seenEventIdsByAccount.set(accountId, s); }
+  return s;
+}
 // Mutex for friend request processing to prevent concurrent hello corruption
 let helloProcessingLock: Promise<void> = Promise.resolve();
 const SEEN_EVENT_MAX = 1000;
 
 /** Mark an event as processed (in-memory + DB). Call BEFORE decrypt to prevent
  *  ratchet corruption on retry — Signal decrypt consumes message keys. */
-function markProcessed(bridge: KeychatBridgeClient, eventId: string | undefined, createdAt?: number): void {
+function markProcessed(bridge: KeychatBridgeClient, accountId: string, eventId: string | undefined, createdAt?: number): void {
   if (!eventId) return;
-  seenEventIds.add(eventId);
-  if (seenEventIds.size > SEEN_EVENT_MAX) {
-    const first = seenEventIds.values().next().value;
-    if (first) seenEventIds.delete(first);
+  const seen = getSeenEventIds(accountId);
+  seen.add(eventId);
+  if (seen.size > SEEN_EVENT_MAX) {
+    const first = seen.values().next().value;
+    if (first) seen.delete(first);
   }
   bridge.markEventProcessed(eventId, createdAt).catch(() => {/* best effort */});
 }
@@ -373,7 +389,7 @@ export const keychatPlugin: ChannelPlugin<ResolvedKeychatAccount> = {
       const normalizedTo = normalizePubkey(to);
 
       // Check if we have a session with this peer (placeholder mappings with empty signalPubkey don't count)
-      const existingPeer = peerSessions.get(normalizedTo);
+      const existingPeer = getPeerSessions(aid).get(normalizedTo);
       const hasSession = !!(existingPeer && existingPeer.signalPubkey);
       if (!hasSession) {
         // No session — need to send hello first and queue the message
@@ -391,7 +407,7 @@ export const keychatPlugin: ChannelPlugin<ResolvedKeychatAccount> = {
             // Register the onetimekey as an address mapping so the hello reply
             // (sent to our onetimekey) can be routed to this peer.
             if (helloResult.onetimekey) {
-              addressToPeer.set(helloResult.onetimekey, normalizedTo);
+              getAddressToPeer(aid).set(helloResult.onetimekey, normalizedTo);
               console.log(`[keychat] Registered onetimekey ${helloResult.onetimekey.slice(0, 16)}... → ${normalizedTo.slice(0, 16)}`);
               try {
                 await bridge.saveAddressMapping(helloResult.onetimekey, normalizedTo);
@@ -548,8 +564,9 @@ export const keychatPlugin: ChannelPlugin<ResolvedKeychatAccount> = {
         });
       }
 
-      // Check peer sessions
-      if (peerSessions.size === 0) {
+      // Check peer sessions — warn if ALL accounts have zero peers
+      const anyPeers = [...peerSessionsByAccount.values()].some((m) => m.size > 0);
+      if (!anyPeers) {
         issues.push({
           channel: "keychat",
           accountId: accounts[0]?.accountId ?? DEFAULT_ACCOUNT_ID,
@@ -779,7 +796,7 @@ export const keychatPlugin: ChannelPlugin<ResolvedKeychatAccount> = {
           for (const m of mappings) {
             // Skip placeholder rows created by outgoing hello before reply arrives
             if (!m.signal_pubkey) continue;
-            peerSessions.set(m.nostr_pubkey, {
+            getPeerSessions(account.accountId).set(m.nostr_pubkey, {
               signalPubkey: m.signal_pubkey,
               deviceId: m.device_id,
               name: m.name,
@@ -792,7 +809,7 @@ export const keychatPlugin: ChannelPlugin<ResolvedKeychatAccount> = {
           if (sessions.length > 0) {
             ctx.log?.info(`[${account.accountId}] Restored ${sessions.length} peer session(s) from DB (no mappings yet)`);
             for (const s of sessions) {
-              peerSessions.set(s.signal_pubkey, {
+              getPeerSessions(account.accountId).set(s.signal_pubkey, {
                 signalPubkey: s.signal_pubkey,
                 deviceId: parseInt(s.device_id, 10),
                 name: "",
@@ -806,7 +823,7 @@ export const keychatPlugin: ChannelPlugin<ResolvedKeychatAccount> = {
         const { mappings: addrMappings } = await bridge.getAddressMappings();
         if (addrMappings.length > 0) {
           for (const am of addrMappings) {
-            addressToPeer.set(am.address, am.peer_nostr_pubkey);
+            getAddressToPeer(account.accountId).set(am.address, am.peer_nostr_pubkey);
             // Track in peerSubscribedAddresses so cleanup works after restart
             const peerList = peerSubscribedAddresses.get(am.peer_nostr_pubkey) ?? [];
             peerList.push(am.address);
@@ -819,9 +836,9 @@ export const keychatPlugin: ChannelPlugin<ResolvedKeychatAccount> = {
         // This fills in missing addresses for peers that had sessions but incomplete mappings
         const { addresses: allAliceAddrs } = await bridge.getReceivingAddresses();
         if (allAliceAddrs.length > 0) {
-          // Build signal_pubkey → nostr_pubkey mapping from peerSessions
+          // Build signal_pubkey → nostr_pubkey mapping from getPeerSessions
           const signalToNostr = new Map<string, string>();
-          for (const [nostrPk, info] of peerSessions.entries()) {
+          for (const [nostrPk, info] of getPeerSessions(account.accountId).entries()) {
             signalToNostr.set(info.signalPubkey, nostrPk);
           }
 
@@ -842,7 +859,7 @@ export const keychatPlugin: ChannelPlugin<ResolvedKeychatAccount> = {
             const existingSet = new Set(existing);
             for (const addr of latest) {
               if (!existingSet.has(addr)) {
-                addressToPeer.set(addr, peerNostr);
+                getAddressToPeer(account.accountId).set(addr, peerNostr);
                 existing.push(addr);
                 try { await bridge.saveAddressMapping(addr, peerNostr); } catch { /* */ }
               }
@@ -850,7 +867,7 @@ export const keychatPlugin: ChannelPlugin<ResolvedKeychatAccount> = {
             // Trim to MAX if over
             while (existing.length > MAX_RECEIVING_ADDRESSES) {
               const old = existing.shift()!;
-              addressToPeer.delete(old);
+              getAddressToPeer(account.accountId).delete(old);
               try { await bridge.deleteAddressMapping(old); } catch { /* */ }
             }
             peerSubscribedAddresses.set(peerNostr, existing);
@@ -858,7 +875,7 @@ export const keychatPlugin: ChannelPlugin<ResolvedKeychatAccount> = {
         }
 
         // Subscribe to all receiving addresses
-        const toSubscribe = Array.from(addressToPeer.keys());
+        const toSubscribe = Array.from(getAddressToPeer(account.accountId).keys());
         if (toSubscribe.length > 0) {
           await bridge.addSubscription(toSubscribe);
           ctx.log?.info(
@@ -945,7 +962,7 @@ export const keychatPlugin: ChannelPlugin<ResolvedKeychatAccount> = {
           const { mappings } = await bridge.getPeerMappings();
           for (const m of mappings) {
             if (!m.signal_pubkey) continue;
-            peerSessions.set(m.nostr_pubkey, {
+            getPeerSessions(account.accountId).set(m.nostr_pubkey, {
               signalPubkey: m.signal_pubkey,
               deviceId: m.device_id,
               name: m.name,
@@ -956,13 +973,13 @@ export const keychatPlugin: ChannelPlugin<ResolvedKeychatAccount> = {
           const { mappings: addrMappings } = await bridge.getAddressMappings();
           peerSubscribedAddresses.clear();
           for (const am of addrMappings) {
-            addressToPeer.set(am.address, am.peer_nostr_pubkey);
+            getAddressToPeer(account.accountId).set(am.address, am.peer_nostr_pubkey);
             const peerList = peerSubscribedAddresses.get(am.peer_nostr_pubkey) ?? [];
             peerList.push(am.address);
             peerSubscribedAddresses.set(am.peer_nostr_pubkey, peerList);
           }
           // Re-subscribe to receiving addresses from address_peer_mapping
-          const toSubRestart = Array.from(addressToPeer.keys());
+          const toSubRestart = Array.from(getAddressToPeer(account.accountId).keys());
           if (toSubRestart.length > 0) {
             await bridge.addSubscription(toSubRestart);
           }
@@ -983,14 +1000,14 @@ export const keychatPlugin: ChannelPlugin<ResolvedKeychatAccount> = {
           ctx.log?.info(`[${account.accountId}] ▶ Inbound handler invoked: kind=${msg.event_kind} from=${msg.from_pubkey?.slice(0,16)} to=${msg.to_address?.slice(0,16)} prekey=${msg.is_prekey} event=${msg.event_id?.slice(0,16)}`);
           // Deduplicate events — check in-memory first, then DB
           if (msg.event_id) {
-            if (seenEventIds.has(msg.event_id)) {
+            if (getSeenEventIds(account.accountId).has(msg.event_id)) {
               return; // Already processed (in-memory)
             }
             // Check persistent DB
             try {
               const { processed } = await bridge.isEventProcessed(msg.event_id);
               if (processed) {
-                seenEventIds.add(msg.event_id);
+                getSeenEventIds(account.accountId).add(msg.event_id);
                 return; // Already processed (persisted)
               }
             } catch {
@@ -999,7 +1016,7 @@ export const keychatPlugin: ChannelPlugin<ResolvedKeychatAccount> = {
           }
 
           if (msg.event_kind === 1059) {
-            markProcessed(bridge, msg.event_id, msg.created_at);
+            markProcessed(bridge, account.accountId, msg.event_id, msg.created_at);
 
             // Check if this is an MLS group message (to_address matches a known listen key)
             const mlsGroupId = msg.to_address ? mlsListenKeyToGroup.get(msg.to_address) : undefined;
@@ -1017,7 +1034,7 @@ export const keychatPlugin: ChannelPlugin<ResolvedKeychatAccount> = {
             }
           } else if (msg.event_kind === 4) {
             // ── Kind:4 DM ──
-            markProcessed(bridge, msg.event_id, msg.created_at);
+            markProcessed(bridge, account.accountId, msg.event_id, msg.created_at);
             if (msg.nip04_decrypted) {
               // NIP-04 pre-decrypted message (e.g., group invite via Nip4ChatService)
               // Skip Signal decrypt — plaintext is already in msg.text / msg.encrypted_content
@@ -1030,7 +1047,7 @@ export const keychatPlugin: ChannelPlugin<ResolvedKeychatAccount> = {
             ctx.log?.info(
               `[${account.accountId}] Ignoring inbound event_kind=${msg.event_kind}`,
             );
-            markProcessed(bridge, msg.event_id, msg.created_at);
+            markProcessed(bridge, account.accountId, msg.event_id, msg.created_at);
           }
         } catch (err) {
           ctx.log?.error(
@@ -1107,7 +1124,7 @@ async function handleFriendRequestInner(
   ctx.log?.info(`[${accountId}] Friend request (kind:1059) from ${msg.from_pubkey}`);
 
   // Skip if we already have an active session with this peer (avoids re-sending hello on restart)
-  const existingPeer = peerSessions.get(msg.from_pubkey);
+  const existingPeer = getPeerSessions(accountId).get(msg.from_pubkey);
   if (existingPeer) {
     ctx.log?.info(`[${accountId}] Already have session with ${msg.from_pubkey}, skipping hello`);
     return;
@@ -1159,19 +1176,19 @@ async function handleFriendRequestInner(
   };
 
   // Clean up only the legacy restore entry for THIS peer's signal pubkey (if it was keyed wrong)
-  if (peerSessions.has(hello.peer_signal_pubkey) && hello.peer_signal_pubkey !== hello.peer_nostr_pubkey) {
-    peerSessions.delete(hello.peer_signal_pubkey);
+  if (getPeerSessions(accountId).has(hello.peer_signal_pubkey) && hello.peer_signal_pubkey !== hello.peer_nostr_pubkey) {
+    getPeerSessions(accountId).delete(hello.peer_signal_pubkey);
     ctx.log?.info(`[${accountId}] Cleaned up legacy signal-keyed entry: ${hello.peer_signal_pubkey}`);
   }
 
-  // Update addressToPeer entries that pointed to the old signal key to use nostr key
-  for (const [addr, oldPeerKey] of addressToPeer) {
+  // Update getAddressToPeer entries that pointed to the old signal key to use nostr key
+  for (const [addr, oldPeerKey] of getAddressToPeer(accountId)) {
     if (oldPeerKey === hello.peer_signal_pubkey) {
-      addressToPeer.set(addr, hello.peer_nostr_pubkey);
+      getAddressToPeer(accountId).set(addr, hello.peer_nostr_pubkey);
     }
   }
 
-  peerSessions.set(hello.peer_nostr_pubkey, peer);
+  getPeerSessions(accountId).set(hello.peer_nostr_pubkey, peer);
 
   // NOTE: peer mapping already persisted by Rust handle_process_hello (with local Signal keys).
   // Do NOT call savePeerMapping here — it would overwrite local_signal_pubkey/privkey with NULL.
@@ -1208,11 +1225,11 @@ async function handleFriendRequestInner(
   try {
     const { addresses } = await bridge.getReceivingAddresses();
     if (addresses.length > 0) {
-      const newAddrs = addresses.filter((a) => !addressToPeer.has(a.nostr_pubkey));
+      const newAddrs = addresses.filter((a) => !getAddressToPeer(accountId).has(a.nostr_pubkey));
       if (newAddrs.length > 0) {
         await bridge.addSubscription(newAddrs.map((a) => a.nostr_pubkey));
         for (const a of newAddrs) {
-          addressToPeer.set(a.nostr_pubkey, hello.peer_nostr_pubkey);
+          getAddressToPeer(accountId).set(a.nostr_pubkey, hello.peer_nostr_pubkey);
           try {
             await bridge.saveAddressMapping(a.nostr_pubkey, hello.peer_nostr_pubkey);
           } catch { /* best effort */ }
@@ -1288,7 +1305,7 @@ async function handleNip04Message(
 
       // Dispatch to agent
       displayText = `[Group Invite] ${inviteMessage}. Joined group "${joinResult.name}" with ${joinResult.member_count} members.`;
-      const senderLabel = peerSessions.get(senderIdPubkey)?.name || senderIdPubkey.slice(0, 12);
+      const senderLabel = getPeerSessions(accountId).get(senderIdPubkey)?.name || senderIdPubkey.slice(0, 12);
       await dispatchGroupToAgent(bridge, accountId, joinResult.group_id, senderIdPubkey, senderLabel, displayText, msg.event_id, runtime, ctx, { message: displayText, pubkey: joinResult.group_id });
       return;
     }
@@ -1303,7 +1320,7 @@ async function handleNip04Message(
 
   // Dispatch as regular DM from the sender
   const senderPubkey = msg.from_pubkey;
-  const peer = peerSessions.get(senderPubkey);
+  const peer = getPeerSessions(accountId).get(senderPubkey);
   const senderLabel = peer?.name || senderPubkey.slice(0, 12);
   await dispatchToAgent(bridge, accountId, senderPubkey, senderLabel, displayText, msg.event_id, runtime, ctx);
 }
@@ -1637,12 +1654,12 @@ async function handleEncryptedDM(
   // from_pubkey is EPHEMERAL — use to_address to find the actual peer
   let peerNostrPubkey: string | null = null;
   if (msg.to_address) {
-    peerNostrPubkey = addressToPeer.get(msg.to_address) ?? null;
+    peerNostrPubkey = getAddressToPeer(accountId).get(msg.to_address) ?? null;
   }
 
   // Fallback: try from_pubkey directly (may work for initial messages)
   if (!peerNostrPubkey) {
-    peerNostrPubkey = peerSessions.has(msg.from_pubkey) ? msg.from_pubkey : null;
+    peerNostrPubkey = getPeerSessions(accountId).has(msg.from_pubkey) ? msg.from_pubkey : null;
   }
 
   // Fallback: query DB for address mapping before brute-force
@@ -1652,7 +1669,7 @@ async function handleEncryptedDM(
       const found = dbMappings.find((m) => m.address === msg.to_address);
       if (found) {
         peerNostrPubkey = found.peer_nostr_pubkey;
-        addressToPeer.set(msg.to_address, peerNostrPubkey);
+        getAddressToPeer(accountId).set(msg.to_address, peerNostrPubkey);
         ctx.log?.info(`[${accountId}] Resolved peer from DB address mapping: ${peerNostrPubkey}`);
       }
     } catch { /* DB lookup failed */ }
@@ -1662,7 +1679,7 @@ async function handleEncryptedDM(
   // If we still can't identify the peer, try the PreKey path: extract the
   // Signal identity key from the ciphertext and look up the peer directly.
   // This is deterministic and avoids the old brute-force fallback.
-  const hasPeerSession = peerNostrPubkey ? peerSessions.has(peerNostrPubkey) : false;
+  const hasPeerSession = peerNostrPubkey ? getPeerSessions(accountId).has(peerNostrPubkey) : false;
   ctx.log?.info(`[${accountId}] DEBUG: peerNostrPubkey=${peerNostrPubkey}, hasPeerSession=${hasPeerSession}, is_prekey=${msg.is_prekey}, to_address=${msg.to_address}`);
   if ((!peerNostrPubkey || !hasPeerSession) && msg.is_prekey) {
     ctx.log?.info(`[${accountId}] Entering PreKey path, encrypted_content length=${msg.encrypted_content?.length}, first40=${msg.encrypted_content?.slice(0, 40)}`);
@@ -1673,8 +1690,8 @@ async function handleEncryptedDM(
         const sigKey = prekeyInfo.signal_identity_key;
         ctx.log?.info(`[${accountId}] PreKey message detected — signal identity: ${sigKey}`);
 
-        // Strategy 1: Look up Signal key in existing peerSessions
-        for (const [nostrPk, ps] of peerSessions) {
+        // Strategy 1: Look up Signal key in existing getPeerSessions
+        for (const [nostrPk, ps] of getPeerSessions(accountId)) {
           if (ps.signalPubkey === sigKey) {
             peerNostrPubkey = nostrPk;
             ctx.log?.info(`[${accountId}] PreKey routed to existing peer ${nostrPk} via signal key match`);
@@ -1696,7 +1713,7 @@ async function handleEncryptedDM(
 
         // Strategy 3: This is a new peer replying to our hello — decrypt first,
         // then identify via PrekeyMessageModel.nostr_id or helloSentTo set
-        if (!peerNostrPubkey || !peerSessions.has(peerNostrPubkey)) {
+        if (!peerNostrPubkey || !getPeerSessions(accountId).has(peerNostrPubkey)) {
           ctx.log?.info(`[${accountId}] PreKey from unknown signal key ${sigKey} — attempting decrypt to identify sender`);
 
           const decryptResult = await bridge.decryptMessage(sigKey, msg.encrypted_content, true);
@@ -1749,7 +1766,7 @@ async function handleEncryptedDM(
             name: senderName,
             nostrPubkey: senderNostrId,
           };
-          peerSessions.set(senderNostrId, newPeer);
+          getPeerSessions(accountId).set(senderNostrId, newPeer);
           await bridge.savePeerMapping(senderNostrId, sigKey, 1, senderName);
           ctx.log?.info(`[${accountId}] ✅ Session established with ${senderNostrId} (signal: ${sigKey})`);
 
@@ -1759,19 +1776,19 @@ async function handleEncryptedDM(
             const aliceAddrs: string[] = decryptResult?.alice_addrs ?? [];
             if (aliceAddrs.length > 0) {
               const latest = aliceAddrs.slice(-MAX_RECEIVING_ADDRESSES);
-              const newAddrs = latest.filter((a) => !addressToPeer.has(a));
+              const newAddrs = latest.filter((a) => !getAddressToPeer(accountId).has(a));
               if (newAddrs.length > 0) {
                 await bridge.addSubscription(newAddrs);
                 const peerAddrs = peerSubscribedAddresses.get(senderNostrId!) ?? [];
                 for (const a of newAddrs) {
-                  addressToPeer.set(a, senderNostrId!);
+                  getAddressToPeer(accountId).set(a, senderNostrId!);
                   peerAddrs.push(a);
                   try { await bridge.saveAddressMapping(a, senderNostrId!); } catch { /* */ }
                 }
                 // Trim to MAX_RECEIVING_ADDRESSES
                 while (peerAddrs.length > MAX_RECEIVING_ADDRESSES) {
                   const old = peerAddrs.shift()!;
-                  addressToPeer.delete(old);
+                  getAddressToPeer(accountId).delete(old);
                   try { await bridge.removeSubscription([old]); } catch { /* */ }
                   try { await bridge.deleteAddressMapping(old); } catch { /* */ }
                 }
@@ -1828,16 +1845,16 @@ async function handleEncryptedDM(
     ctx.log?.error(
       `[${accountId}] ⚠️ Address mapping miss for to_address=${msg.to_address} — falling back to brute-force peer lookup.`,
     );
-    if (peerSessions.size === 1) {
-      peerNostrPubkey = peerSessions.keys().next().value ?? null;
+    if (getPeerSessions(accountId).size === 1) {
+      peerNostrPubkey = getPeerSessions(accountId).keys().next().value ?? null;
     } else {
-      for (const [key] of peerSessions) {
+      for (const [key] of getPeerSessions(accountId)) {
         peerNostrPubkey = key;
         break;
       }
     }
     if (peerNostrPubkey && msg.to_address) {
-      addressToPeer.set(msg.to_address, peerNostrPubkey);
+      getAddressToPeer(accountId).set(msg.to_address, peerNostrPubkey);
       try {
         await bridge.saveAddressMapping(msg.to_address, peerNostrPubkey);
       } catch { /* best effort */ }
@@ -1851,7 +1868,7 @@ async function handleEncryptedDM(
     return;
   }
 
-  const peer = peerSessions.get(peerNostrPubkey);
+  const peer = getPeerSessions(accountId).get(peerNostrPubkey);
   if (!peer) {
     ctx.log?.error(`[${accountId}] No session info for peer ${peerNostrPubkey}`);
     return;
@@ -1868,14 +1885,14 @@ async function handleEncryptedDM(
       `[${accountId}] ⚠️ Decrypt failed for mapped peer ${peerNostrPubkey} (signal: ${peer.signalPubkey}): ${err}. Trying other peers...`,
     );
     // Fallback: try other peers — this means address→peer mapping was wrong
-    for (const [key, otherPeer] of peerSessions) {
+    for (const [key, otherPeer] of getPeerSessions(accountId)) {
       if (key === peerNostrPubkey) continue;
       try {
         decryptResult = await bridge.decryptMessage(otherPeer.signalPubkey, msg.encrypted_content, msg.is_prekey);
         actualPeer = otherPeer;
         peerNostrPubkey = key;
         // Fix address mapping
-        if (msg.to_address) addressToPeer.set(msg.to_address, key);
+        if (msg.to_address) getAddressToPeer(accountId).set(msg.to_address, key);
         ctx.log?.info(`[${accountId}] Decrypt succeeded with peer ${key} — address mapping corrected`);
         break;
       } catch { continue; }
@@ -1897,18 +1914,18 @@ async function handleEncryptedDM(
     const aliceAddrs: string[] = (decryptResult as any)?.alice_addrs ?? [];
     if (aliceAddrs.length > 0) {
       const latest = aliceAddrs.slice(-MAX_RECEIVING_ADDRESSES);
-      const newAddrs = latest.filter((a) => !addressToPeer.has(a));
+      const newAddrs = latest.filter((a) => !getAddressToPeer(accountId).has(a));
       if (newAddrs.length > 0) {
         await bridge.addSubscription(newAddrs);
         const peerAddrs = peerSubscribedAddresses.get(peerNostrPubkey) ?? [];
         for (const a of newAddrs) {
-          addressToPeer.set(a, peerNostrPubkey);
+          getAddressToPeer(accountId).set(a, peerNostrPubkey);
           peerAddrs.push(a);
           try { await bridge.saveAddressMapping(a, peerNostrPubkey); } catch { /* */ }
         }
         while (peerAddrs.length > MAX_RECEIVING_ADDRESSES) {
           const old = peerAddrs.shift()!;
-          addressToPeer.delete(old);
+          getAddressToPeer(accountId).delete(old);
           try { await bridge.removeSubscription([old]); } catch { /* */ }
           try { await bridge.deleteAddressMapping(old); } catch { /* */ }
         }
@@ -2327,7 +2344,7 @@ async function handleReceivingAddressRotation(
 
   // Map the new address to the peer (in-memory + DB)
   if (peerKey) {
-    addressToPeer.set(address, peerKey);
+    getAddressToPeer(accountId).set(address, peerKey);
     try {
       await bridge.saveAddressMapping(address, peerKey);
     } catch {
@@ -2343,7 +2360,7 @@ async function handleReceivingAddressRotation(
   const staleAddrs: string[] = [];
   while (addrs.length > MAX_RECEIVING_ADDRESSES) {
     const old = addrs.shift()!;
-    addressToPeer.delete(old);
+    getAddressToPeer(accountId).delete(old);
     staleAddrs.push(old);
   }
   peerSubscribedAddresses.set(peerAddrKey, addrs);

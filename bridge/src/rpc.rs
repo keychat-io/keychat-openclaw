@@ -1063,6 +1063,8 @@ impl BridgeState {
                 vec![
                     "wss://relay.keychat.io".to_string(),
                     "wss://relay.damus.io".to_string(),
+                    "wss://nos.lol".to_string(),
+                    "wss://relay.ditto.pub".to_string(),
                 ]
             });
 

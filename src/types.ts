@@ -52,6 +52,8 @@ const DEFAULT_ACCOUNT_ID = "default";
 const DEFAULT_RELAYS = [
   "wss://relay.keychat.io",
   "wss://relay.damus.io",
+  "wss://nos.lol",
+  "wss://relay.ditto.pub",
 ];
 
 export function listKeychatAccountIds(cfg: OpenClawConfig): string[] {

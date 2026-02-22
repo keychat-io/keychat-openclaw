@@ -27,9 +27,28 @@ curl -fsSL https://raw.githubusercontent.com/keychat-io/keychat-openclaw/main/sc
 
 This clones the repo, downloads the binary, registers the plugin, and restarts the gateway in one step.
 
+### Upgrade
+
+```bash
+# npm plugin
+openclaw plugins install @keychat-io/keychat@latest
+openclaw gateway restart
+
+# shell script (re-run the same command)
+curl -fsSL https://raw.githubusercontent.com/keychat-io/keychat-openclaw/main/scripts/install.sh | bash
+```
+
 ### Connect
 
-After install, check `openclaw status` for your agent's Keychat ID, then scan the QR code at `~/.openclaw/keychat/qr-default.png` with the [Keychat app](https://keychat.io).
+After install, check `openclaw status` for your agent's Keychat ID, then scan the QR code with the [Keychat app](https://keychat.io).
+
+View the QR code in a Linux terminal:
+
+```bash
+chafa ~/.openclaw/keychat/qr-default.png
+# or
+qrencode -t ANSIUTF8 "https://www.keychat.io/u/?k=YOUR_NPUB"
+```
 
 ## Configuration
 

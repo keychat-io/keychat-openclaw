@@ -620,7 +620,7 @@ export const keychatPlugin: ChannelPlugin<ResolvedKeychatAccount> = {
           channel: "keychat",
           accountId: accounts[0]?.accountId ?? DEFAULT_ACCOUNT_ID,
           kind: "runtime",
-          message: "Bridge binary not found. Run 'cargo build --release' in bridge/",
+          message: "Bridge binary not found (will auto-download on start)",
         });
       }
 
@@ -705,7 +705,9 @@ export const keychatPlugin: ChannelPlugin<ResolvedKeychatAccount> = {
         activeBridges.delete(account.accountId);
       }
 
-      // 1. Start the Rust bridge sidecar
+      // 1. Start the Rust bridge sidecar (auto-download binary if missing)
+      const { ensureBinary } = await import("./ensure-binary.js");
+      await ensureBinary();
       const bridge = new KeychatBridgeClient();
       await bridge.start();
       ctx.log?.info(`[${account.accountId}] Bridge sidecar started`);

@@ -8,19 +8,28 @@ This plugin gives your OpenClaw agent a **sovereign identity** — a self-genera
 
 Your agent becomes a full Keychat citizen: it can receive friend requests, establish Signal Protocol sessions, and exchange messages with Keychat app users. All messages are encrypted with forward and backward secrecy — not even relay operators can read them.
 
-## Quick Start
+## Install
+
+### Option A: OpenClaw plugin (recommended)
 
 ```bash
 openclaw plugins install @keychat-io/keychat
-```
-
-That's it. The plugin auto-downloads the pre-compiled binary for your platform, enables itself, and your agent gets a Keychat identity on next gateway restart.
-
-```bash
 openclaw gateway restart
 ```
 
-Check `openclaw status` for your agent's Keychat ID, then scan the QR code at `~/.openclaw/keychat-qr.png` with the Keychat app to connect.
+The bridge binary is auto-downloaded on first start. Supported platforms: macOS (ARM/x64), Linux (x64/ARM64).
+
+### Option B: Shell script
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/keychat-io/keychat-openclaw/main/scripts/install.sh | bash
+```
+
+This clones the repo, downloads the binary, registers the plugin, and restarts the gateway in one step.
+
+### Connect
+
+After install, check `openclaw status` for your agent's Keychat ID, then scan the QR code at `~/.openclaw/keychat-qr.png` with the [Keychat app](https://keychat.io).
 
 ## Configuration
 

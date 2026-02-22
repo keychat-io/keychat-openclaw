@@ -283,12 +283,46 @@ const mlsInitialized = new Set<string>();
  */
 function normalizePubkey(input: string): string {
   const trimmed = input.replace(/^nostr:/i, "").trim();
-  // If it's npub, keep as-is (bridge handles conversion)
   // If it's hex, lowercase it
   if (/^[0-9a-fA-F]{64}$/.test(trimmed)) {
     return trimmed.toLowerCase();
   }
+  // Decode npub (bech32) to hex so all keys use a consistent format
+  if (trimmed.startsWith("npub1")) {
+    try {
+      const decoded = bech32Decode(trimmed);
+      if (decoded) return decoded.toLowerCase();
+    } catch { /* fall through */ }
+  }
   return trimmed;
+}
+
+/** Decode bech32 npub to hex pubkey. */
+function bech32Decode(npub: string): string | null {
+  const CHARSET = "qpzry9x8gf2tvdw0s3jn54khce6mua7l";
+  const pos = npub.lastIndexOf("1");
+  if (pos < 1) return null;
+  const data: number[] = [];
+  for (let i = pos + 1; i < npub.length; i++) {
+    const v = CHARSET.indexOf(npub.charAt(i));
+    if (v === -1) return null;
+    data.push(v);
+  }
+  // Remove 6-char checksum
+  const values = data.slice(0, -6);
+  // Convert from 5-bit groups to 8-bit bytes
+  let acc = 0, bits = 0;
+  const result: number[] = [];
+  for (const v of values) {
+    acc = (acc << 5) | v;
+    bits += 5;
+    if (bits >= 8) {
+      bits -= 8;
+      result.push((acc >> bits) & 0xff);
+    }
+  }
+  if (result.length !== 32) return null;
+  return result.map((b) => b.toString(16).padStart(2, "0")).join("");
 }
 
 export const keychatPlugin: ChannelPlugin<ResolvedKeychatAccount> = {
@@ -1258,28 +1292,8 @@ async function handleFriendRequestInner(
     ctx.log?.error(`[${accountId}] Failed to send profile to ${hello.peer_nostr_pubkey}: ${e}`);
   }
 
-  // Handle receiving address rotation after send
+  // Handle receiving address rotation after send (per-peer, limited to MAX_RECEIVING_ADDRESSES)
   await handleReceivingAddressRotation(bridge, accountId, sendResult, hello.peer_nostr_pubkey);
-
-  // Refresh receiving address subscriptions so subsequent DMs can be mapped to this peer
-  try {
-    const { addresses } = await bridge.getReceivingAddresses();
-    if (addresses.length > 0) {
-      const newAddrs = addresses.filter((a) => !getAddressToPeer(accountId).has(a.nostr_pubkey));
-      if (newAddrs.length > 0) {
-        await bridge.addSubscription(newAddrs.map((a) => a.nostr_pubkey));
-        for (const a of newAddrs) {
-          getAddressToPeer(accountId).set(a.nostr_pubkey, hello.peer_nostr_pubkey);
-          try {
-            await bridge.saveAddressMapping(a.nostr_pubkey, hello.peer_nostr_pubkey);
-          } catch { /* best effort */ }
-        }
-        ctx.log?.info(`[${accountId}] Mapped ${newAddrs.length} receiving address(es) to peer ${hello.peer_nostr_pubkey}`);
-      }
-    }
-  } catch (err) {
-    ctx.log?.error(`[${accountId}] Failed to refresh receiving addresses after hello: ${err}`);
-  }
 
   // Flush any pending messages that were waiting for this session
   if (pendingHelloMessages.has(hello.peer_nostr_pubkey)) {

@@ -1236,7 +1236,7 @@ impl BridgeState {
     }
 
     /// Save a peer mapping from TS side.
-    async fn handle_save_peer_mapping(&self, params: serde_json::Value) -> Result<serde_json::Value> {
+    async fn handle_save_peer_mapping(&mut self, params: serde_json::Value) -> Result<serde_json::Value> {
         let signal = self.signal.as_ref()
             .ok_or_else(|| anyhow::anyhow!("Signal not initialized"))?;
         let nostr_pubkey = params.get("nostr_pubkey").and_then(|v| v.as_str())
@@ -1246,6 +1246,19 @@ impl BridgeState {
         let device_id = params.get("device_id").and_then(|v| v.as_u64()).unwrap_or(1) as u32;
         let name = params.get("name").and_then(|v| v.as_str()).unwrap_or("");
         signal.save_peer_mapping(nostr_pubkey, signal_pubkey, device_id, name).await?;
+
+        // Also update in-memory peer cache so sendMessage uses the new signal key
+        if !signal_pubkey.is_empty() {
+            let peer = PeerSession {
+                nostr_pubkey: nostr_pubkey.to_string(),
+                curve25519_pk_hex: signal_pubkey.to_string(),
+                device_id,
+                onetimekey: None,
+            };
+            self.peers.insert(nostr_pubkey.to_string(), peer);
+            log::info!("Updated in-memory peer cache for {} (signal: {})", nostr_pubkey, signal_pubkey);
+        }
+
         Ok(serde_json::json!({"saved": true}))
     }
 

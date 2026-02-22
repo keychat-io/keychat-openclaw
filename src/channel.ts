@@ -233,6 +233,21 @@ function getSeenEventIds(accountId: string): Set<string> {
   if (!s) { s = new Set(); seenEventIdsByAccount.set(accountId, s); }
   return s;
 }
+/**
+ * Resolve display name for a keychat account.
+ * Priority: channel config name > agent identity name > fallback.
+ */
+function resolveDisplayName(cfg: any, accountId: string, channelName?: string, fallback = "Keychat Agent"): string {
+  if (channelName) return channelName;
+  // Look up agent identity name via bindings
+  const bindings = (cfg.bindings ?? []) as Array<{ agentId?: string; match?: { channel?: string; accountId?: string } }>;
+  const binding = bindings.find(b => b.match?.channel === "keychat" && b.match?.accountId === accountId);
+  const agentId = binding?.agentId ?? (accountId === DEFAULT_ACCOUNT_ID ? "main" : accountId);
+  const agents = (cfg.agents?.list ?? []) as Array<{ id?: string; identity?: { name?: string }; name?: string }>;
+  const agent = agents.find(a => a.id === agentId);
+  return agent?.identity?.name || agent?.name || fallback;
+}
+
 // Mutex for friend request processing to prevent concurrent hello corruption
 let helloProcessingLock: Promise<void> = Promise.resolve();
 const SEEN_EVENT_MAX = 1000;
@@ -1134,6 +1149,7 @@ async function handleFriendRequestInner(
   const core = runtime;
   const cfg = core.config.loadConfig();
   const account = resolveKeychatAccount({ cfg, accountId });
+  const displayName = resolveDisplayName(cfg, accountId, account.name);
   const policy = account.config.dmPolicy ?? "pairing";
   const allowFrom = (account.config.allowFrom ?? []).map((e) => normalizePubkey(String(e)));
 
@@ -1197,7 +1213,7 @@ async function handleFriendRequestInner(
   const isPendingApproval = policy === "pairing" && !allowFrom.includes(senderNormalized);
   const greetingText = isPendingApproval
     ? "👋 Hi! I received your request. It's pending approval — the owner will review it shortly."
-    : `👋 Hi! I'm ${account.name || "Keychat Guide"}. We're connected now — feel free to chat!`;
+    : `👋 Hi! I'm ${displayName}. We're connected now — feel free to chat!`;
   // Wrap as KeychatMessage so the receiver can identify this as a hello reply (type 102)
   const helloReplyMsg = JSON.stringify({
     type: 102,  // DM_ADD_CONTACT_FROM_BOB
@@ -1206,13 +1222,13 @@ async function handleFriendRequestInner(
   });
   const sendResult = await retrySend(() => bridge.sendMessage(hello.peer_nostr_pubkey, helloReplyMsg, {
     isHelloReply: true,
-    senderName: account.name,
+    senderName: displayName,
   }));
   ctx.log?.info(`[${accountId}] Sent hello reply to ${hello.peer_nostr_pubkey}`);
 
   // Send profile so peer knows our display name
   try {
-    await retrySend(() => bridge.sendProfile(hello.peer_nostr_pubkey, { name: account.name || "Keychat Guide" }));
+    await retrySend(() => bridge.sendProfile(hello.peer_nostr_pubkey, { name: displayName }));
     ctx.log?.info(`[${accountId}] Sent profile to ${hello.peer_nostr_pubkey}`);
   } catch (e) {
     ctx.log?.error(`[${accountId}] Failed to send profile to ${hello.peer_nostr_pubkey}: ${e}`);

@@ -3,7 +3,8 @@ import { z } from "zod";
 
 const allowFromEntry = z.union([z.string(), z.number()]);
 
-export const KeychatConfigSchema = z.object({
+/** Per-account config fields (used both at top-level and inside accounts.*) */
+const KeychatAccountSchema = z.object({
   /** Account name */
   name: z.string().optional(),
 
@@ -36,6 +37,12 @@ export const KeychatConfigSchema = z.object({
 
   /** Nostr Wallet Connect URI (nostr+walletconnect://...) for Lightning wallet access */
   nwcUri: z.string().optional(),
+});
+
+/** Top-level keychat config: single-account fields + optional multi-account map. */
+export const KeychatConfigSchema = KeychatAccountSchema.extend({
+  /** Multiple named accounts, each with its own identity/config. */
+  accounts: z.record(z.string(), KeychatAccountSchema).optional(),
 });
 
 export type KeychatConfig = z.infer<typeof KeychatConfigSchema>;

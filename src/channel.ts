@@ -311,6 +311,15 @@ export const keychatPlugin: ChannelPlugin<ResolvedKeychatAccount> = {
     idLabel: "keychatPubkey",
     normalizeAllowEntry: (entry) => normalizePubkey(entry),
     notifyApproval: async ({ id }) => {
+      // Try each active bridge — notifyApproval doesn't receive accountId,
+      // so send from whichever bridge has a session with this peer.
+      for (const [, bridge] of activeBridges) {
+        try {
+          await bridge.sendMessage(id, "✅ Pairing approved! You can now chat with this agent.");
+          return; // sent successfully
+        } catch { /* try next bridge */ }
+      }
+      // Fallback: wait for default bridge
       try {
         const bridge = await waitForBridge(DEFAULT_ACCOUNT_ID, 10000);
         await bridge.sendMessage(id, "✅ Pairing approved! You can now chat with this agent.");
@@ -319,14 +328,22 @@ export const keychatPlugin: ChannelPlugin<ResolvedKeychatAccount> = {
   },
 
   security: {
-    resolveDmPolicy: ({ account }) => ({
-      policy: account.config.dmPolicy ?? "pairing",
-      allowFrom: account.config.allowFrom ?? [],
-      policyPath: "channels.keychat.dmPolicy",
-      allowFromPath: "channels.keychat.allowFrom",
-      approveHint: formatPairingApproveHint("keychat"),
-      normalizeEntry: (raw) => normalizePubkey(raw),
-    }),
+    resolveDmPolicy: ({ cfg, account, accountId }) => {
+      const channelCfg = (cfg.channels as Record<string, unknown> | undefined)?.keychat as
+        | { accounts?: Record<string, unknown> } | undefined;
+      const isMultiAccount = channelCfg?.accounts && Object.keys(channelCfg.accounts).length > 0;
+      const prefix = isMultiAccount
+        ? `channels.keychat.accounts.${accountId ?? DEFAULT_ACCOUNT_ID}`
+        : "channels.keychat";
+      return {
+        policy: account.config.dmPolicy ?? "pairing",
+        allowFrom: account.config.allowFrom ?? [],
+        policyPath: `${prefix}.dmPolicy`,
+        allowFromPath: `${prefix}.allowFrom`,
+        approveHint: formatPairingApproveHint("keychat"),
+        normalizeEntry: (raw) => normalizePubkey(raw),
+      };
+    },
   },
 
   messaging: {
@@ -443,17 +460,15 @@ export const keychatPlugin: ChannelPlugin<ResolvedKeychatAccount> = {
         };
       }
     },
-    sendMedia: async ({ to, filePath, caption, accountId }) => {
+    sendMedia: async ({ to, text, mediaUrl: incomingMediaUrl, accountId }) => {
       const aid = accountId ?? DEFAULT_ACCOUNT_ID;
       const bridge = await waitForBridge(aid);
 
-      // Encrypt and upload via Blossom, using agent's Nostr key for auth
-      const { mediaUrl } = await encryptAndUpload(
-        filePath,
-        async (content: string, tags: string[][]) => bridge.signBlossomEvent(content, tags),
-      );
+      // Media URL is resolved by the SDK before reaching the plugin
+      const mediaUrl = incomingMediaUrl ?? "";
 
       // Send the media URL as a message (same as Keychat app)
+      const caption = text;
       const messageText = caption ? `${mediaUrl}\n${caption}` : mediaUrl;
 
       // Check if target is an MLS group
@@ -515,7 +530,7 @@ export const keychatPlugin: ChannelPlugin<ResolvedKeychatAccount> = {
         message: string;
       }> = [];
 
-      // Check bridge binary exists
+      // Check bridge binary exists (shared across all accounts)
       const bridgePath = join(
         import.meta.dirname ?? __dirname,
         "..",
@@ -527,7 +542,7 @@ export const keychatPlugin: ChannelPlugin<ResolvedKeychatAccount> = {
       if (!existsSync(bridgePath)) {
         issues.push({
           channel: "keychat",
-          accountId: "default",
+          accountId: accounts[0]?.accountId ?? DEFAULT_ACCOUNT_ID,
           kind: "runtime",
           message: "Bridge binary not found. Run 'cargo build --release' in bridge/",
         });
@@ -537,25 +552,25 @@ export const keychatPlugin: ChannelPlugin<ResolvedKeychatAccount> = {
       if (peerSessions.size === 0) {
         issues.push({
           channel: "keychat",
-          accountId: "default",
+          accountId: accounts[0]?.accountId ?? DEFAULT_ACCOUNT_ID,
           kind: "runtime",
           message: "No peers connected yet",
         });
       }
 
-      // Check Signal DB exists
-      const dbPath = join(process.env.HOME || "~", ".openclaw", "keychat-signal-default.db");
-      if (!existsSync(dbPath)) {
-        issues.push({
-          channel: "keychat",
-          accountId: "default",
-          kind: "runtime",
-          message: "Signal DB file missing",
-        });
-      }
-
-      // Per-account errors
+      // Check Signal DB exists for each account
       for (const account of accounts) {
+        const dbPath = join(process.env.HOME || "~", ".openclaw", `keychat-signal-${account.accountId}.db`);
+        if (!existsSync(dbPath)) {
+          issues.push({
+            channel: "keychat",
+            accountId: account.accountId,
+            kind: "runtime",
+            message: "Signal DB file missing",
+          });
+        }
+
+        // Per-account errors
         const lastError = typeof account.lastError === "string" ? account.lastError.trim() : "";
         if (lastError) {
           issues.push({
@@ -571,8 +586,8 @@ export const keychatPlugin: ChannelPlugin<ResolvedKeychatAccount> = {
     },
     buildChannelSummary: ({ snapshot }) => ({
       configured: snapshot.configured ?? false,
-      publicKey: snapshot.publicKey ?? null,
-      npub: snapshot.npub ?? null,
+      publicKey: (snapshot as Record<string, unknown>).publicKey ?? null,
+      npub: (snapshot as Record<string, unknown>).npub ?? null,
       running: snapshot.running ?? false,
       lastStartAt: snapshot.lastStartAt ?? null,
       lastStopAt: snapshot.lastStopAt ?? null,
@@ -747,13 +762,12 @@ export const keychatPlugin: ChannelPlugin<ResolvedKeychatAccount> = {
       ctx.setStatus({
         accountId: account.accountId,
         publicKey: info.pubkey_hex,
-        npub: info.pubkey_npub,
         contactUrl,
         qrCodePath: qrPath,
         running: true,
         configured: true,
-        lastStartAt: new Date().toISOString(),
-      });
+        lastStartAt: Date.now(),
+      } as any);
 
       activeBridges.set(account.accountId, bridge);
 
@@ -1068,7 +1082,7 @@ async function handleFriendRequest(
   bridge: KeychatBridgeClient,
   accountId: string,
   msg: InboundMessage,
-  ctx: { log?: { info: (m: string) => void; error: (m: string) => void }; setStatus: (s: Record<string, unknown>) => void },
+  ctx: { log?: { info: (m: string) => void; error: (m: string) => void; warn?: (m: string) => void }; setStatus: (s: Record<string, unknown> | any) => void },
   runtime: ReturnType<typeof getKeychatRuntime>,
 ): Promise<void> {
   // Serialize hello processing to prevent concurrent hellos from corrupting each other's sessions
@@ -1087,7 +1101,7 @@ async function handleFriendRequestInner(
   bridge: KeychatBridgeClient,
   accountId: string,
   msg: InboundMessage,
-  ctx: { log?: { info: (m: string) => void; error: (m: string) => void }; setStatus: (s: Record<string, unknown>) => void },
+  ctx: { log?: { info: (m: string) => void; error: (m: string) => void; warn?: (m: string) => void }; setStatus: (s: Record<string, unknown> | any) => void },
   runtime: ReturnType<typeof getKeychatRuntime>,
 ): Promise<void> {
   ctx.log?.info(`[${accountId}] Friend request (kind:1059) from ${msg.from_pubkey}`);
@@ -1184,7 +1198,7 @@ async function handleFriendRequestInner(
     await retrySend(() => bridge.sendProfile(hello.peer_nostr_pubkey, { name: account.name || "Keychat Guide" }));
     ctx.log?.info(`[${accountId}] Sent profile to ${hello.peer_nostr_pubkey}`);
   } catch (e) {
-    ctx.log?.warn(`[${accountId}] Failed to send profile to ${hello.peer_nostr_pubkey}: ${e}`);
+    ctx.log?.error(`[${accountId}] Failed to send profile to ${hello.peer_nostr_pubkey}: ${e}`);
   }
 
   // Handle receiving address rotation after send
@@ -1233,7 +1247,7 @@ async function handleNip04Message(
   bridge: KeychatBridgeClient,
   accountId: string,
   msg: InboundMessage,
-  ctx: { log?: { info: (m: string) => void; error: (m: string) => void }; setStatus: (s: Record<string, unknown>) => void },
+  ctx: { log?: { info: (m: string) => void; error: (m: string) => void; warn?: (m: string) => void }; setStatus: (s: Record<string, unknown> | any) => void },
   runtime: ReturnType<typeof getKeychatRuntime>,
 ): Promise<void> {
   const plaintext = msg.text || msg.encrypted_content;
@@ -1304,7 +1318,7 @@ async function handleMlsGroupMessage(
   accountId: string,
   groupId: string,
   msg: InboundMessage,
-  ctx: { log?: { info: (m: string) => void; error: (m: string) => void }; setStatus: (s: Record<string, unknown>) => void },
+  ctx: { log?: { info: (m: string) => void; error: (m: string) => void; warn?: (m: string) => void }; setStatus: (s: Record<string, unknown> | any) => void },
   runtime: ReturnType<typeof getKeychatRuntime>,
 ): Promise<void> {
   try {
@@ -1425,7 +1439,7 @@ async function handleMlsWelcome(
   bridge: KeychatBridgeClient,
   accountId: string,
   msg: InboundMessage,
-  ctx: { log?: { info: (m: string) => void; error: (m: string) => void }; setStatus: (s: Record<string, unknown>) => void },
+  ctx: { log?: { info: (m: string) => void; error: (m: string) => void; warn?: (m: string) => void }; setStatus: (s: Record<string, unknown> | any) => void },
   runtime: ReturnType<typeof getKeychatRuntime>,
 ): Promise<void> {
   try {
@@ -1510,7 +1524,7 @@ async function dispatchMlsGroupToAgent(
   displayText: string,
   eventId: string,
   runtime: ReturnType<typeof getKeychatRuntime>,
-  ctx: { log?: { info: (m: string) => void; error: (m: string) => void }; setStatus: (s: Record<string, unknown>) => void },
+  ctx: { log?: { info: (m: string) => void; error: (m: string) => void; warn?: (m: string) => void }; setStatus: (s: Record<string, unknown> | any) => void },
   mediaPath?: string,
 ): Promise<void> {
   const core = runtime;
@@ -1533,7 +1547,6 @@ async function dispatchMlsGroupToAgent(
     from: senderName,
     timestamp: Date.now(),
     body: displayText,
-    groupName,
   });
 
   const ctxPayload = core.channel.reply.finalizeInboundContext({
@@ -1618,7 +1631,7 @@ async function handleEncryptedDM(
   bridge: KeychatBridgeClient,
   accountId: string,
   msg: InboundMessage,
-  ctx: { log?: { info: (m: string) => void; error: (m: string) => void }; setStatus: (s: Record<string, unknown>) => void },
+  ctx: { log?: { info: (m: string) => void; error: (m: string) => void; warn?: (m: string) => void }; setStatus: (s: Record<string, unknown> | any) => void },
   runtime: ReturnType<typeof getKeychatRuntime>,
 ): Promise<void> {
   // from_pubkey is EPHEMERAL — use to_address to find the actual peer
@@ -2074,7 +2087,7 @@ async function dispatchToAgent(
   displayText: string,
   eventId: string,
   runtime: ReturnType<typeof getKeychatRuntime>,
-  ctx: { log?: { info: (m: string) => void; error: (m: string) => void }; setStatus: (s: Record<string, unknown>) => void },
+  ctx: { log?: { info: (m: string) => void; error: (m: string) => void; warn?: (m: string) => void }; setStatus: (s: Record<string, unknown> | any) => void },
   mediaPath?: string,
 ): Promise<void> {
   const core = runtime;
@@ -2189,7 +2202,7 @@ async function dispatchGroupToAgent(
   displayText: string,
   eventId: string,
   runtime: ReturnType<typeof getKeychatRuntime>,
-  ctx: { log?: { info: (m: string) => void; error: (m: string) => void }; setStatus: (s: Record<string, unknown>) => void },
+  ctx: { log?: { info: (m: string) => void; error: (m: string) => void; warn?: (m: string) => void }; setStatus: (s: Record<string, unknown> | any) => void },
   groupMessage: { message: string; pubkey: string; subtype?: number; ext?: string },
   mediaPath?: string,
 ): Promise<void> {
@@ -2221,7 +2234,6 @@ async function dispatchGroupToAgent(
     from: senderLabel,
     timestamp: Date.now(),
     body: displayText,
-    groupName,
   });
 
   const ctxPayload = core.channel.reply.finalizeInboundContext({

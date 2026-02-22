@@ -96,7 +96,7 @@ async function uploadToBlossom(
       "Content-Type": "application/octet-stream",
       Authorization: authHeader,
     },
-    body: encrypted,
+    body: new Uint8Array(encrypted),
   });
 
   if (!response.ok) {

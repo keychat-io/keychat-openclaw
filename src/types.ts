@@ -21,6 +21,12 @@ export interface KeychatAccountConfig {
   nwcUri?: string;
 }
 
+/** Top-level keychat channel config — supports single-account or multi-account. */
+export interface KeychatChannelConfig extends KeychatAccountConfig {
+  /** Multi-account: each key is an accountId with its own config. */
+  accounts?: Record<string, KeychatAccountConfig>;
+}
+
 export interface ResolvedKeychatAccount {
   accountId: string;
   name?: string;
@@ -50,20 +56,20 @@ const DEFAULT_RELAYS = [
 
 export function listKeychatAccountIds(cfg: OpenClawConfig): string[] {
   const keychatCfg = (cfg.channels as Record<string, unknown> | undefined)?.keychat as
-    | KeychatAccountConfig
+    | KeychatChannelConfig
     | undefined;
 
-  // Even without mnemonic, we return default — identity will be auto-generated
-  if (keychatCfg && keychatCfg.enabled !== false) {
-    return [DEFAULT_ACCOUNT_ID];
+  if (!keychatCfg) return [];
+
+  // Multi-account: return all account keys that aren't explicitly disabled
+  if (keychatCfg.accounts && Object.keys(keychatCfg.accounts).length > 0) {
+    return Object.entries(keychatCfg.accounts)
+      .filter(([_, acct]) => acct.enabled !== false)
+      .map(([id]) => id);
   }
 
-  // If keychat config exists at all (even empty), consider it a configured account
-  if (keychatCfg !== undefined) {
-    return [DEFAULT_ACCOUNT_ID];
-  }
-
-  return [];
+  // Single-account (backward compat): config exists → "default" account
+  return [DEFAULT_ACCOUNT_ID];
 }
 
 export function resolveDefaultKeychatAccountId(cfg: OpenClawConfig): string {
@@ -75,37 +81,42 @@ export function resolveKeychatAccount(opts: {
   accountId?: string | null;
 }): ResolvedKeychatAccount {
   const accountId = opts.accountId ?? DEFAULT_ACCOUNT_ID;
-  const keychatCfg = (opts.cfg.channels as Record<string, unknown> | undefined)?.keychat as
-    | KeychatAccountConfig
+  const channelCfg = (opts.cfg.channels as Record<string, unknown> | undefined)?.keychat as
+    | KeychatChannelConfig
     | undefined;
 
-  const enabled = keychatCfg?.enabled !== false;
-  const mnemonic = keychatCfg?.mnemonic?.trim();
-  // Configured = has mnemonic (identity exists) or will be auto-generated
+  // Multi-account: look up specific account; single-account: use top-level config
+  const acctCfg: KeychatAccountConfig | undefined =
+    channelCfg?.accounts && Object.keys(channelCfg.accounts).length > 0
+      ? channelCfg.accounts[accountId]
+      : channelCfg;
+
+  const enabled = acctCfg?.enabled !== false;
+  const mnemonic = acctCfg?.mnemonic?.trim();
   const configured = true; // Always configured — identity auto-generates
 
   return {
     accountId,
-    name: keychatCfg?.name?.trim() || undefined,
+    name: acctCfg?.name?.trim() || undefined,
     enabled,
     configured,
     mnemonic: mnemonic || undefined,
-    publicKey: keychatCfg?.publicKey ?? "",
-    npub: keychatCfg?.npub,
-    relays: keychatCfg?.relays ?? DEFAULT_RELAYS,
-    lightningAddress: keychatCfg?.lightningAddress?.trim() || undefined,
-    nwcUri: keychatCfg?.nwcUri?.trim() || undefined,
+    publicKey: acctCfg?.publicKey ?? "",
+    npub: acctCfg?.npub,
+    relays: acctCfg?.relays ?? DEFAULT_RELAYS,
+    lightningAddress: acctCfg?.lightningAddress?.trim() || undefined,
+    nwcUri: acctCfg?.nwcUri?.trim() || undefined,
     config: {
-      enabled: keychatCfg?.enabled,
-      name: keychatCfg?.name,
-      mnemonic: keychatCfg?.mnemonic,
-      publicKey: keychatCfg?.publicKey,
-      npub: keychatCfg?.npub,
-      relays: keychatCfg?.relays,
-      dmPolicy: keychatCfg?.dmPolicy,
-      allowFrom: keychatCfg?.allowFrom,
-      lightningAddress: keychatCfg?.lightningAddress,
-      nwcUri: keychatCfg?.nwcUri,
+      enabled: acctCfg?.enabled,
+      name: acctCfg?.name,
+      mnemonic: acctCfg?.mnemonic,
+      publicKey: acctCfg?.publicKey,
+      npub: acctCfg?.npub,
+      relays: acctCfg?.relays,
+      dmPolicy: acctCfg?.dmPolicy,
+      allowFrom: acctCfg?.allowFrom,
+      lightningAddress: acctCfg?.lightningAddress,
+      nwcUri: acctCfg?.nwcUri,
     },
   };
 }

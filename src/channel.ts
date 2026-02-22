@@ -1226,7 +1226,7 @@ async function handleFriendRequestInner(
     : `👋 Hi! I'm ${displayName}. We're connected now — feel free to chat!`;
   // Wrap as KeychatMessage so the receiver can identify this as a hello reply (type 102)
   const helloReplyMsg = JSON.stringify({
-    type: 0,  // Use type 0 (dm) so Keychat app displays the message (type 102 is silently dropped by app's proccessMessage)
+    type: 100,  // KeyChatEventKinds.dm — Keychat app displays type 100 as chat message (type 102 is silently dropped)
     c: "signal",
     msg: greetingText,
   });

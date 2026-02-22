@@ -24,7 +24,7 @@ const plugin = {
 };
 
 export default plugin;
-export { getAgentKeychatId, getAgentKeychatUrl };
+export { getAgentKeychatId, getAgentKeychatUrl, getAllAgentContacts, resetPeerSession } from "./src/channel.js";
 export { generateQRDataUrl } from "./src/qrcode.js";
 export {
   requestInvoice,

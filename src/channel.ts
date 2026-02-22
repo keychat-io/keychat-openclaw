@@ -403,6 +403,17 @@ export const keychatPlugin: ChannelPlugin<ResolvedKeychatAccount> = {
       const message = core.channel.text.convertMarkdownTables(text ?? "", tableMode);
       const normalizedTo = normalizePubkey(to);
 
+      // Handle /reset signal command — reset Signal session and re-send hello
+      if (message.trim() === "/reset signal") {
+        const result = await resetPeerSession(normalizedTo, aid, true);
+        console.log(`[keychat] [${aid}] Reset session result for ${normalizedTo}:`, result);
+        return {
+          channel: "keychat" as const,
+          to: normalizedTo,
+          messageId: `reset-${Date.now()}`,
+        };
+      }
+
       // Check if we have a session with this peer (placeholder mappings with empty signalPubkey don't count)
       const existingPeer = getPeerSessions(aid).get(normalizedTo);
       const hasSession = !!(existingPeer && existingPeer.signalPubkey);
@@ -747,7 +758,7 @@ export const keychatPlugin: ChannelPlugin<ResolvedKeychatAccount> = {
 
       // 6. Log the agent's Keychat ID for the owner
       const contactUrl = `https://www.keychat.io/u/?k=${info.pubkey_npub}`;
-      const qrPath = join(process.env.HOME || "~", ".openclaw", "keychat-qr.png");
+      const qrPath = join(process.env.HOME || "~", ".openclaw", `keychat-qr-${account.accountId}.png`);
 
       // Generate QR code (best-effort)
       let qrSaved = false;
@@ -757,9 +768,12 @@ export const keychatPlugin: ChannelPlugin<ResolvedKeychatAccount> = {
         qrSaved = true;
       } catch { /* qrcode not installed, skip */ }
 
+      const cfg = runtime.config.loadConfig();
+      const displayName = resolveDisplayName(cfg, account.accountId, account.name);
+
       ctx.log?.info(`\n` +
         `═══════════════════════════════════════════════════\n` +
-        `  🔑 Agent Keychat ID:\n` +
+        `  🔑 ${displayName} — Keychat ID:\n` +
         `\n` +
         `  ${info.pubkey_npub}\n` +
         `\n` +
@@ -776,7 +790,7 @@ export const keychatPlugin: ChannelPlugin<ResolvedKeychatAccount> = {
         const execFileAsync = promisify(execFile);
         await execFileAsync("openclaw", [
           "system", "event",
-          "--text", `[Keychat Plugin] Channel is ready. Send this to the owner:\n` +
+          "--text", `[Keychat Plugin] Agent "${displayName}" (account: ${account.accountId}) is ready.\n` +
             `🔑 Keychat ID: ${info.pubkey_npub}\n` +
             `📱 Add contact: ${contactUrl}\n` +
             (qrSaved
@@ -2484,6 +2498,108 @@ export function getContactInfo(accountId: string = DEFAULT_ACCOUNT_ID): {
   return {
     npub: info.pubkey_npub,
     contactUrl: `https://www.keychat.io/u/?k=${info.pubkey_npub}`,
-    qrCodePath: join(process.env.HOME || "~", ".openclaw", "keychat-qr.png"),
+    qrCodePath: join(process.env.HOME || "~", ".openclaw", `keychat-qr-${accountId}.png`),
   };
+}
+
+/**
+ * Get contact info for ALL active Keychat accounts/agents.
+ * Returns an array of { accountId, npub, contactUrl, qrCodePath, name }.
+ */
+export function getAllAgentContacts(): Array<{
+  accountId: string;
+  npub: string;
+  contactUrl: string;
+  qrCodePath: string;
+}> {
+  const results: Array<{
+    accountId: string;
+    npub: string;
+    contactUrl: string;
+    qrCodePath: string;
+  }> = [];
+  for (const [accountId, info] of accountInfoCache.entries()) {
+    results.push({
+      accountId,
+      npub: info.pubkey_npub,
+      contactUrl: `https://www.keychat.io/u/?k=${info.pubkey_npub}`,
+      qrCodePath: join(process.env.HOME || "~", ".openclaw", `keychat-qr-${accountId}.png`),
+    });
+  }
+  return results;
+}
+
+/**
+ * Reset the Signal session with a peer and optionally re-send hello.
+ * Equivalent to "Reset Signal Session" in the Keychat app.
+ *
+ * @param peerPubkey - Nostr pubkey (hex or npub) of the peer
+ * @param accountId - Account to reset session for
+ * @param resendHello - Whether to send a new hello after reset (default: true)
+ */
+export async function resetPeerSession(
+  peerPubkey: string,
+  accountId: string = DEFAULT_ACCOUNT_ID,
+  resendHello: boolean = true,
+): Promise<{ reset: boolean; helloSent?: boolean; error?: string }> {
+  const normalizedPeer = normalizePubkey(peerPubkey);
+  const bridge = activeBridges.get(accountId);
+  if (!bridge) {
+    return { reset: false, error: `No active bridge for account ${accountId}` };
+  }
+
+  // 1. Find the peer's signal pubkey
+  const peerInfo = getPeerSessions(accountId).get(normalizedPeer);
+  const signalPubkey = peerInfo?.signalPubkey;
+
+  // 2. Delete Signal session via bridge RPC
+  if (signalPubkey) {
+    try {
+      await bridge.deleteSession(signalPubkey);
+      console.log(`[keychat] [${accountId}] Deleted Signal session for ${normalizedPeer} (signal: ${signalPubkey})`);
+    } catch (err) {
+      console.error(`[keychat] [${accountId}] Failed to delete Signal session: ${err}`);
+    }
+  }
+
+  // 3. Clear in-memory maps
+  getPeerSessions(accountId).delete(normalizedPeer);
+
+  // Clear address mappings pointing to this peer
+  const addrMap = getAddressToPeer(accountId);
+  for (const [addr, peer] of addrMap) {
+    if (peer === normalizedPeer) {
+      addrMap.delete(addr);
+      try { await bridge.deleteAddressMapping(addr); } catch { /* best effort */ }
+    }
+  }
+
+  // Clear from helloSentTo to allow re-sending
+  helloSentTo.delete(normalizedPeer);
+  pendingHelloMessages.delete(normalizedPeer);
+
+  console.log(`[keychat] [${accountId}] Session reset for peer ${normalizedPeer}`);
+
+  // 4. Optionally re-send hello
+  if (resendHello) {
+    try {
+      const accountInfo = accountInfoCache.get(accountId);
+      const name = accountInfo?.pubkey_npub ?? "Keychat Agent";
+      helloSentTo.add(normalizedPeer);
+      const helloResult = await bridge.sendHello(normalizedPeer, name);
+      console.log(`[keychat] [${accountId}] Hello re-sent to ${normalizedPeer} (event: ${helloResult.event_id})`);
+
+      if (helloResult.onetimekey) {
+        getAddressToPeer(accountId).set(helloResult.onetimekey, normalizedPeer);
+        try { await bridge.saveAddressMapping(helloResult.onetimekey, normalizedPeer); } catch { /* */ }
+      }
+      return { reset: true, helloSent: true };
+    } catch (err) {
+      helloSentTo.delete(normalizedPeer);
+      console.error(`[keychat] [${accountId}] Failed to re-send hello: ${err}`);
+      return { reset: true, helloSent: false, error: `Reset OK but hello failed: ${err}` };
+    }
+  }
+
+  return { reset: true };
 }

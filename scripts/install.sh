@@ -84,7 +84,7 @@ fi
 # ── Register plugin ──
 echo ""
 echo "📦 Registering plugin..."
-openclaw plugins install -l "$INSTALL_DIR" 2>&1 || true
+openclaw plugins install "$INSTALL_DIR" 2>&1 || true
 
 # ── Auto-configure ──
 CONFIG_FILE="$HOME/.openclaw/openclaw.json"

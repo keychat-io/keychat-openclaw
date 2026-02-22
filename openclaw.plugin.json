@@ -3,7 +3,7 @@
   "channels": ["keychat"],
   "name": "Keychat",
   "description": "Sovereign identity + E2E encrypted chat via Signal Protocol over Nostr relays. Lightning wallet support via LNURL-pay and NWC.",
-  "version": "2026.2.20",
+  "version": "0.1.0",
   "repository": "https://github.com/keychat-io/keychat-openclaw",
   "license": "AGPL-3.0",
   "configSchema": {

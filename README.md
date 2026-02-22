@@ -22,7 +22,7 @@ The bridge binary is auto-downloaded on first start. Supported platforms: macOS 
 ### Option B: Shell script
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/keychat-io/keychat-openclaw/main/scripts/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/keychat-io/openclaw-channel-keychat/main/scripts/install.sh | bash
 ```
 
 This clones the repo, downloads the binary, registers the plugin, and restarts the gateway in one step.

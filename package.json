@@ -5,7 +5,7 @@
   "license": "AGPL-3.0",
   "repository": {
     "type": "git",
-    "url": "https://github.com/keychat-io/keychat-openclaw.git"
+    "url": "https://github.com/keychat-io/openclaw-channel-keychat.git"
   },
   "type": "module",
   "scripts": {

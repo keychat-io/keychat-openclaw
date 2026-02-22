@@ -1139,7 +1139,7 @@ async function handleFriendRequestInner(
   ctx.log?.info(`[${accountId}] Friend request (kind:1059) from ${msg.from_pubkey} (created_at=${msg.created_at})`);
 
   // Skip stale friend requests (relay replays old events on reconnect)
-  const MAX_FRIEND_REQUEST_AGE_SECS = 300; // 5 minutes
+  const MAX_FRIEND_REQUEST_AGE_SECS = 60; // 1 minute
   if (msg.created_at) {
     const ageSecs = Math.floor(Date.now() / 1000) - msg.created_at;
     if (ageSecs > MAX_FRIEND_REQUEST_AGE_SECS) {
@@ -1148,11 +1148,11 @@ async function handleFriendRequestInner(
     }
   }
 
-  // Skip if we already have an active session with this peer (avoids re-sending hello on restart)
+  // If we already have a session, re-process the hello to handle re-pairing
+  // (e.g. peer deleted us and re-added, or our previous hello reply wasn't received)
   const existingPeer = getPeerSessions(accountId).get(msg.from_pubkey);
   if (existingPeer) {
-    ctx.log?.info(`[${accountId}] Already have session with ${msg.from_pubkey}, skipping hello`);
-    return;
+    ctx.log?.info(`[${accountId}] Re-processing friend request from ${msg.from_pubkey} (existing session will be replaced)`);
   }
 
   // Check DM policy before processing — reject unauthorized friend requests

@@ -29,7 +29,7 @@ This clones the repo, downloads the binary, registers the plugin, and restarts t
 
 ### Connect
 
-After install, check `openclaw status` for your agent's Keychat ID, then scan the QR code at `~/.openclaw/keychat-qr.png` with the [Keychat app](https://keychat.io).
+After install, check `openclaw status` for your agent's Keychat ID, then scan the QR code at `~/.openclaw/keychat/qr-default.png` with the [Keychat app](https://keychat.io).
 
 ## Configuration
 
@@ -142,7 +142,7 @@ Generate an NWC connection string from your wallet app (Keychat, Alby Hub, Mutin
 
 - If messages fail to decrypt, the plugin will automatically warn the peer
 - The peer should re-add the agent as a contact to establish a new session
-- As a last resort, delete the Signal DB: `rm ~/.openclaw/keychat-signal-default.db` and restart
+- As a last resort, delete the Signal DB: `rm ~/.openclaw/keychat/signal-default.db` and restart
 
 ### Messages not delivered
 

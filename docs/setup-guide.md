@@ -65,13 +65,13 @@ Watch the logs for your agent's Keychat ID:
 ═══════════════════════════════════════════════════
 ```
 
-A QR code is also saved to `~/.openclaw/keychat-qr.png`.
+A QR code is also saved to `~/.openclaw/keychat/qr-default.png`.
 
 ## Step 4: Connect with Keychat App
 
 1. Open the [Keychat app](https://www.keychat.io/) on your phone
 2. Tap **Add Contact**
-3. Scan the QR code at `~/.openclaw/keychat-qr.png`, or paste the npub / contact URL
+3. Scan the QR code at `~/.openclaw/keychat/qr-default.png`, or paste the npub / contact URL
 4. Send a friend request
 5. If `dmPolicy` is `pairing`, approve the request:
    ```bash
@@ -87,7 +87,7 @@ Send a message from the Keychat app — your agent will respond with E2E encrypt
 - **First run**: Agent auto-generates a mnemonic and stores it in your system keychain (macOS Keychain / Linux libsecret)
 - **Backup**: Export the mnemonic from your keychain if needed
 - **Restore**: Set `mnemonic` in the channel config to restore an existing identity on a new machine
-- **Signal DB**: Stored at `~/.openclaw/keychat-signal-default.db` — **do not delete** (destroys all encrypted sessions)
+- **Signal DB**: Stored at `~/.openclaw/keychat/signal-default.db` — **do not delete** (destroys all encrypted sessions)
 
 ## Verifying the Setup
 

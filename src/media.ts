@@ -179,7 +179,7 @@ export async function downloadAndDecrypt(media: KeychatMediaInfo): Promise<strin
   const decipher = createDecipheriv("aes-256-ctr", keyBuf, ivBuf);
   const decrypted = Buffer.concat([decipher.update(encrypted)]);
 
-  const mediaDir = join(process.env.HOME || "~", ".openclaw", "keychat-media");
+  const mediaDir = join(process.env.HOME || "~", ".openclaw", "keychat", "media");
   await mkdir(mediaDir, { recursive: true });
   const filename = media.sourceName || `${Date.now()}.${media.suffix}`;
   const filepath = join(mediaDir, filename);

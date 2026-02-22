@@ -22,7 +22,7 @@ The bridge binary is auto-downloaded on first start. Supported platforms: macOS 
 ### Option B: Shell script
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/keychat-io/openclaw-channel-keychat/main/scripts/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/keychat-io/keychat-openclaw/main/scripts/install.sh | bash
 ```
 
 This clones the repo, downloads the binary, registers the plugin, and restarts the gateway in one step.
@@ -35,19 +35,19 @@ After install, check `openclaw status` for your agent's Keychat ID, then scan th
 
 All options go under `channels.keychat` in your OpenClaw config:
 
-| Option | Type | Default | Description |
-|--------|------|---------|-------------|
-| `enabled` | boolean | `false` | Enable/disable the Keychat channel |
-| `name` | string | — | Display name for this account |
-| `relays` | string[] | `["wss://relay.keychat.io"]` | Nostr relay WebSocket URLs |
-| `dmPolicy` | enum | `"pairing"` | Access policy: `pairing`, `allowlist`, `open`, `disabled` |
-| `allowFrom` | string[] | `[]` | Allowed sender pubkeys (npub or hex) |
-| `mnemonic` | string | — | Identity mnemonic (auto-generated, stored in keychain) |
-| `publicKey` | string | — | Derived hex public key (read-only) |
-| `npub` | string | — | Derived bech32 npub (read-only) |
-| `lightningAddress` | string | — | Lightning address for receiving payments |
-| `nwcUri` | string | — | Nostr Wallet Connect URI for wallet access |
-| `markdown` | object | — | Markdown formatting overrides |
+| Option             | Type     | Default                      | Description                                               |
+| ------------------ | -------- | ---------------------------- | --------------------------------------------------------- |
+| `enabled`          | boolean  | `false`                      | Enable/disable the Keychat channel                        |
+| `name`             | string   | —                            | Display name for this account                             |
+| `relays`           | string[] | `["wss://relay.keychat.io"]` | Nostr relay WebSocket URLs                                |
+| `dmPolicy`         | enum     | `"pairing"`                  | Access policy: `pairing`, `allowlist`, `open`, `disabled` |
+| `allowFrom`        | string[] | `[]`                         | Allowed sender pubkeys (npub or hex)                      |
+| `mnemonic`         | string   | —                            | Identity mnemonic (auto-generated, stored in keychain)    |
+| `publicKey`        | string   | —                            | Derived hex public key (read-only)                        |
+| `npub`             | string   | —                            | Derived bech32 npub (read-only)                           |
+| `lightningAddress` | string   | —                            | Lightning address for receiving payments                  |
+| `nwcUri`           | string   | —                            | Nostr Wallet Connect URI for wallet access                |
+| `markdown`         | object   | —                            | Markdown formatting overrides                             |
 
 ### DM Policies
 
@@ -61,21 +61,27 @@ All options go under `channels.keychat` in your OpenClaw config:
 Keychat supports Lightning payments:
 
 ### Lightning Address (receive-only)
+
 Configure a Lightning address so your agent can generate invoices:
+
 ```json
 {
   "lightningAddress": "user@walletofsatoshi.com"
 }
 ```
+
 The agent can create invoices via LNURL-pay protocol. Note: payment verification depends on the provider (some don't support verify URLs).
 
 ### Nostr Wallet Connect (NWC)
+
 For full wallet access (create invoices, check balance, verify payments), configure NWC:
+
 ```json
 {
   "nwcUri": "nostr+walletconnect://pubkey?relay=wss://...&secret=..."
 }
 ```
+
 Generate an NWC connection string from your wallet app (Keychat, Alby Hub, Mutiny, Coinos, etc.).
 
 **Security note**: The agent can receive payments freely. Outbound payments require owner approval — the agent will forward the invoice to the owner instead of paying directly.
@@ -121,32 +127,38 @@ Generate an NWC connection string from your wallet app (Keychat, Alby Hub, Mutin
 ## Troubleshooting
 
 ### Bridge not starting
+
 - Ensure the binary exists: `ls bridge/target/release/keychat-openclaw`
 - Rebuild: `cd bridge && cargo build --release`
 - Check logs for startup errors
 
 ### Relay connection issues
+
 - Verify relay URLs are correct WebSocket endpoints (`wss://...`)
 - Test relay connectivity: `websocat wss://relay.keychat.io`
 - Try alternative relays
 
 ### Session corruption
+
 - If messages fail to decrypt, the plugin will automatically warn the peer
 - The peer should re-add the agent as a contact to establish a new session
 - As a last resort, delete the Signal DB: `rm ~/.openclaw/keychat-signal-default.db` and restart
 
 ### Messages not delivered
+
 - Check if the bridge is responsive: look for health check logs
 - The plugin queues failed messages (up to 100) and retries every 30s
 - Pending messages are also flushed after bridge restart
 
 ### No QR code generated
+
 - Install the `qrcode` npm package: `npm install qrcode`
 - The contact URL in logs works without QR code
 
 ## Development
 
 ### Building
+
 ```bash
 # Build the Rust sidecar
 cd bridge && cargo build --release
@@ -156,6 +168,7 @@ cargo test
 ```
 
 ### Project Structure
+
 ```
 ├── src/
 │   ├── channel.ts        # Main channel plugin (OpenClaw integration)

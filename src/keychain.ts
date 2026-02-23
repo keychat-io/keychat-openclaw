@@ -1,39 +1,75 @@
 /**
- * Mnemonic storage using local encrypted files.
- * No system keychain CLI calls — avoids child_process dependency.
+ * Secure mnemonic storage using system keychain.
+ * Falls back gracefully if keychain is unavailable.
  *
- * Files stored at: ~/.openclaw/keychat/mnemonic-{accountId}
- * Permissions set to owner-only (0o600).
+ * macOS: Uses `security` CLI (Keychain Access)
+ * Linux: Uses `secret-tool` (libsecret / GNOME Keyring)
+ *
+ * Note: This file intentionally uses child_process for system keychain access.
+ * This triggers an OpenClaw scanner warning ("Shell command execution detected")
+ * which is expected — keychain storage is more secure than file-based alternatives.
  */
 
-import { readFileSync, writeFileSync, unlinkSync, mkdirSync } from "node:fs";
-import { dirname } from "node:path";
-import { mnemonicPath, KEYCHAT_DIR } from "./paths.js";
+import { execFileSync } from "node:child_process";
+
+const SERVICE = "openclaw-keychat";
 
 export async function storeMnemonic(accountId: string, mnemonic: string): Promise<boolean> {
+  const key = `mnemonic-${accountId}`;
   try {
-    const filePath = mnemonicPath(accountId);
-    mkdirSync(dirname(filePath), { recursive: true });
-    writeFileSync(filePath, mnemonic, { mode: 0o600 });
-    return true;
+    if (process.platform === "darwin") {
+      execFileSync("security", [
+        "add-generic-password", "-a", key, "-s", SERVICE, "-w", mnemonic, "-U",
+      ], { stdio: "pipe" });
+      return true;
+    } else if (process.platform === "linux") {
+      execFileSync("secret-tool", [
+        "store", "--label", SERVICE, "service", SERVICE, "account", key,
+      ], { stdio: "pipe", input: mnemonic });
+      return true;
+    }
   } catch {
-    return false;
+    // Keychain not available
   }
+  return false;
 }
 
 export async function retrieveMnemonic(accountId: string): Promise<string | null> {
+  const key = `mnemonic-${accountId}`;
   try {
-    return readFileSync(mnemonicPath(accountId), "utf-8").trim();
+    if (process.platform === "darwin") {
+      const result = execFileSync("security", [
+        "find-generic-password", "-a", key, "-s", SERVICE, "-w",
+      ], { stdio: "pipe" });
+      return result.toString().trim();
+    } else if (process.platform === "linux") {
+      const result = execFileSync("secret-tool", [
+        "lookup", "service", SERVICE, "account", key,
+      ], { stdio: "pipe" });
+      return result.toString().trim();
+    }
   } catch {
-    return null;
+    // Not found or keychain unavailable
   }
+  return null;
 }
 
 export async function deleteMnemonic(accountId: string): Promise<boolean> {
+  const key = `mnemonic-${accountId}`;
   try {
-    unlinkSync(mnemonicPath(accountId));
-    return true;
+    if (process.platform === "darwin") {
+      execFileSync("security", [
+        "delete-generic-password", "-a", key, "-s", SERVICE,
+      ], { stdio: "pipe" });
+      return true;
+    } else if (process.platform === "linux") {
+      execFileSync("secret-tool", [
+        "clear", "service", SERVICE, "account", key,
+      ], { stdio: "pipe" });
+      return true;
+    }
   } catch {
-    return false;
+    // Not found
   }
+  return false;
 }

@@ -77,4 +77,4 @@ fi
 
 echo ""
 echo "[keychat] Setup complete! Restart gateway to activate:"
-echo "  openclaw gateway restart"
+echo "  openclaw gateway install && openclaw gateway start"

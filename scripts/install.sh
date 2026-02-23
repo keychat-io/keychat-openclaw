@@ -136,7 +136,8 @@ fi
 # ── Restart gateway ──
 echo ""
 echo "🔄 Restarting gateway..."
-openclaw gateway restart 2>&1 || true
+openclaw gateway install 2>&1 || true
+openclaw gateway start 2>&1 || true
 
 # ── Done ──
 echo ""
@@ -149,6 +150,6 @@ echo "To connect: open the Keychat app and scan the QR code."
 echo ""
 echo "View QR code in terminal:"
 echo "  chafa ~/.openclaw/keychat/qr-default.png"
-echo "  # or: qrencode -t ANSIUTF8 \"\$(openclaw status 2>/dev/null | grep -oP 'npub[a-z0-9]+' | head -1 | xargs -I{} echo 'https://www.keychat.io/u/?k={}')\""
+echo "  # or: qrencode -t ANSIUTF8 \"\$(openclaw status 2>/dev/null | grep -o 'npub[a-z0-9]*' | head -1 | xargs -I{} echo 'https://www.keychat.io/u/?k={}')\""
 echo ""
 echo "Docs: https://github.com/$REPO"

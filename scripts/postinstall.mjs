@@ -12,7 +12,7 @@ import https from "node:https";
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const REPO = "keychat-io/keychat-openclaw";
 const BINARY_DIR = join(__dirname, "..", "bridge", "target", "release");
-const BINARY_PATH = join(BINARY_DIR, "keychat-bridge");
+const BINARY_PATH = join(BINARY_DIR, "keychat-openclaw");
 
 import { statSync } from "node:fs";
 
@@ -29,7 +29,7 @@ const currentVersion = existsSync(versionFile)
 const pluginDir = join(__dirname, "..");
 const pluginDirName = pluginDir.split("/").pop();
 const scriptInstallDir = join(pluginDir, "..", "keychat");
-if (pluginDirName === "keychat-bridge" && existsSync(scriptInstallDir)) {
+if (pluginDirName === "keychat-openclaw" && existsSync(scriptInstallDir)) {
   console.log(`[keychat] Removing conflicting script-installed copy...`);
   try { rmSync(scriptInstallDir, { recursive: true, force: true }); } catch {}
 }

@@ -614,7 +614,7 @@ export const keychatPlugin: ChannelPlugin<ResolvedKeychatAccount> = {
         "bridge",
         "target",
         "release",
-        "keychat-bridge",
+        "keychat-openclaw",
       );
       if (!existsSync(bridgePath)) {
         issues.push({

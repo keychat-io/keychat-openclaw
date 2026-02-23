@@ -31,7 +31,7 @@ function downloadBinary(url: string): Promise<Buffer> {
 /** Ensure bridge binary exists, download if missing. */
 async function ensureBinary(): Promise<void> {
   const binaryDir = join(__dirname, "bridge", "target", "release");
-  const binaryPath = join(binaryDir, "keychat-bridge");
+  const binaryPath = join(binaryDir, "keychat-openclaw");
 
   if (existsSync(binaryPath)) return;
 

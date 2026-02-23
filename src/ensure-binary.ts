@@ -23,7 +23,7 @@ export function getBridgePath(): string {
     "bridge",
     "target",
     "release",
-    "keychat-bridge",
+    "keychat-openclaw",
   );
 }
 

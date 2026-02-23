@@ -5,7 +5,7 @@ set -e
 
 REPO="keychat-io/keychat-openclaw"
 INSTALL_DIR="${OPENCLAW_EXTENSIONS:-$HOME/.openclaw/extensions}/keychat"
-BINARY="$INSTALL_DIR/bridge/target/release/keychat-bridge"
+BINARY="$INSTALL_DIR/bridge/target/release/keychat-openclaw"
 
 echo "🔑 Installing Keychat"
 echo ""

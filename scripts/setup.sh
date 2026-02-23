@@ -21,7 +21,7 @@ if [ ! -f "$PLUGIN_DIR/package.json" ]; then
 fi
 
 BINARY_DIR="$PLUGIN_DIR/bridge/target/release"
-BINARY_PATH="$BINARY_DIR/keychat-bridge"
+BINARY_PATH="$BINARY_DIR/keychat-openclaw"
 
 # --- Download binary ---
 if [ -f "$BINARY_PATH" ]; then

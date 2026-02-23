@@ -40,6 +40,10 @@ Source code is fully open: [github.com/keychat-io/keychat-openclaw](https://gith
 
 ### Upgrade
 
+**Easiest way:** Just tell your agent "upgrade keychat" in any chat. The agent will handle it and reconnect automatically.
+
+Or manually:
+
 If you installed via **Option A**:
 
 ```bash

@@ -1,5 +1,5 @@
 {
-  "id": "keychat",
+  "id": "keychat-openclaw",
   "channels": ["keychat"],
   "name": "Keychat",
   "description": "Sovereign identity + E2E encrypted chat via Signal Protocol over Nostr relays. Lightning wallet support via LNURL-pay and NWC.",

@@ -47,10 +47,10 @@ const platform = process.platform; // darwin, linux
 const arch = process.arch; // arm64, x64
 
 const ARTIFACTS = {
-  "darwin-arm64": "keychat-bridge-darwin-arm64",
-  "darwin-x64": "keychat-bridge-darwin-x64",
-  "linux-x64": "keychat-bridge-linux-x64",
-  "linux-arm64": "keychat-bridge-linux-arm64",
+  "darwin-arm64": "keychat-openclaw-darwin-arm64",
+  "darwin-x64": "keychat-openclaw-darwin-x64",
+  "linux-x64": "keychat-openclaw-linux-x64",
+  "linux-arm64": "keychat-openclaw-linux-arm64",
 };
 
 const artifact = ARTIFACTS[`${platform}-${arch}`];

@@ -38,10 +38,10 @@ async function ensureBinary(): Promise<void> {
   const platform = process.platform;
   const arch = process.arch;
   const artifacts: Record<string, string> = {
-    "darwin-arm64": "keychat-bridge-darwin-arm64",
-    "darwin-x64": "keychat-bridge-darwin-x64",
-    "linux-x64": "keychat-bridge-linux-x64",
-    "linux-arm64": "keychat-bridge-linux-arm64",
+    "darwin-arm64": "keychat-openclaw-darwin-arm64",
+    "darwin-x64": "keychat-openclaw-darwin-x64",
+    "linux-x64": "keychat-openclaw-linux-x64",
+    "linux-arm64": "keychat-openclaw-linux-arm64",
   };
 
   const artifact = artifacts[`${platform}-${arch}`];

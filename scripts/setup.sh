@@ -32,10 +32,10 @@ else
   ARCH="$(uname -m)"
 
   case "$OS-$ARCH" in
-    darwin-arm64)  ARTIFACT="keychat-bridge-darwin-arm64" ;;
-    darwin-x86_64) ARTIFACT="keychat-bridge-darwin-x64" ;;
-    linux-x86_64)  ARTIFACT="keychat-bridge-linux-x64" ;;
-    linux-aarch64) ARTIFACT="keychat-bridge-linux-arm64" ;;
+    darwin-arm64)  ARTIFACT="keychat-openclaw-darwin-arm64" ;;
+    darwin-x86_64) ARTIFACT="keychat-openclaw-darwin-x64" ;;
+    linux-x86_64)  ARTIFACT="keychat-openclaw-linux-x64" ;;
+    linux-aarch64) ARTIFACT="keychat-openclaw-linux-arm64" ;;
     *)
       echo "[keychat] ❌ No pre-compiled binary for $OS-$ARCH"
       echo "[keychat] Build from source: cd $PLUGIN_DIR/bridge && cargo build --release"

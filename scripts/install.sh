@@ -21,10 +21,10 @@ detect_artifact() {
   local arch=$(uname -m)
   local os=$(uname -s | tr '[:upper:]' '[:lower:]')
   case "$os-$arch" in
-    darwin-arm64)  echo "keychat-bridge-darwin-arm64" ;;
-    darwin-x86_64) echo "keychat-bridge-darwin-x64" ;;
-    linux-x86_64)  echo "keychat-bridge-linux-x64" ;;
-    linux-aarch64) echo "keychat-bridge-linux-arm64" ;;
+    darwin-arm64)  echo "keychat-openclaw-darwin-arm64" ;;
+    darwin-x86_64) echo "keychat-openclaw-darwin-x64" ;;
+    linux-x86_64)  echo "keychat-openclaw-linux-x64" ;;
+    linux-aarch64) echo "keychat-openclaw-linux-arm64" ;;
     *) echo "" ;;
   esac
 }

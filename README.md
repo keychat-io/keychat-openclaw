@@ -22,18 +22,18 @@ Supported platforms: macOS (ARM/x64), Linux (x64/ARM64).
 Alternatively, install via shell script:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/keychat-io/keychat/main/scripts/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/keychat-io/keychat-openclaw/main/scripts/install.sh | bash
 ```
 
 ### Security Warnings
 
 During installation, OpenClaw's security scanner may show three warnings. All are expected:
 
-| Warning | Reason |
-|---------|--------|
-| Shell command execution (bridge-client.ts) | Spawns a Rust sidecar for Signal Protocol and MLS encryption. |
-| Shell command execution (keychain.ts) | Stores identity mnemonics in the OS keychain (macOS Keychain / Linux libsecret). |
-| Shell command execution (notify.ts) | Notifies the agent on startup so it can send the Keychat ID and QR code to the user. |
+| Warning                                    | Reason                                                                               |
+| ------------------------------------------ | ------------------------------------------------------------------------------------ |
+| Shell command execution (bridge-client.ts) | Spawns a Rust sidecar for Signal Protocol and MLS encryption.                        |
+| Shell command execution (keychain.ts)      | Stores identity mnemonics in the OS keychain (macOS Keychain / Linux libsecret).     |
+| Shell command execution (notify.ts)        | Notifies the agent on startup so it can send the Keychat ID and QR code to the user. |
 
 Source code is fully open: [github.com/keychat-io/keychat](https://github.com/keychat-io/keychat)
 

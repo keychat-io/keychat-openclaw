@@ -1,5 +1,5 @@
 /**
- * Auto-download the keychat-openclaw bridge binary if missing.
+ * Auto-download the keychat-signal-mls-bridge bridge binary if missing.
  * Called before bridge startup. Downloads from GitHub Releases.
  */
 
@@ -7,13 +7,13 @@ import { existsSync, mkdirSync, chmodSync } from "node:fs";
 import { join } from "node:path";
 import { execSync } from "node:child_process";
 
-const REPO = "keychat-io/keychat-openclaw";
+const REPO = "keychat-io/keychat-signal-mls-bridge";
 
 const ARTIFACTS: Record<string, string> = {
-  "darwin-arm64": "keychat-openclaw-darwin-arm64",
-  "darwin-x64": "keychat-openclaw-darwin-x64",
-  "linux-x64": "keychat-openclaw-linux-x64",
-  "linux-arm64": "keychat-openclaw-linux-arm64",
+  "darwin-arm64": "keychat-signal-mls-bridge-darwin-arm64",
+  "darwin-x64": "keychat-signal-mls-bridge-darwin-x64",
+  "linux-x64": "keychat-signal-mls-bridge-linux-x64",
+  "linux-arm64": "keychat-signal-mls-bridge-linux-arm64",
 };
 
 export function getBridgePath(): string {
@@ -23,7 +23,7 @@ export function getBridgePath(): string {
     "bridge",
     "target",
     "release",
-    "keychat-openclaw",
+    "keychat-signal-mls-bridge",
   );
 }
 
@@ -35,7 +35,7 @@ export async function ensureBinary(): Promise<string> {
   const artifact = ARTIFACTS[key];
   if (!artifact) {
     throw new Error(
-      `No pre-compiled keychat-openclaw binary for ${key}. ` +
+      `No pre-compiled keychat-signal-mls-bridge binary for ${key}. ` +
       `Build from source: cd bridge && cargo build --release`
     );
   }

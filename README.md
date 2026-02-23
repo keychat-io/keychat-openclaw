@@ -22,7 +22,7 @@ The bridge binary is auto-downloaded on first start. Supported platforms: macOS 
 ### Option B: Shell script
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/keychat-io/keychat-openclaw/main/scripts/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/keychat-io/keychat-signal-mls-bridge/main/scripts/install.sh | bash
 ```
 
 This clones the repo, downloads the binary, registers the plugin, and restarts the gateway in one step.
@@ -35,7 +35,7 @@ openclaw plugins install @keychat-io/keychat@latest
 openclaw gateway restart
 
 # shell script (re-run the same command)
-curl -fsSL https://raw.githubusercontent.com/keychat-io/keychat-openclaw/main/scripts/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/keychat-io/keychat-signal-mls-bridge/main/scripts/install.sh | bash
 ```
 
 ### Connect
@@ -113,7 +113,7 @@ Generate an NWC connection string from your wallet app (Keychat, Alby Hub, Mutin
 
 ```
 ┌──────────────┐    JSON-RPC     ┌─────────────────────┐    Nostr     ┌─────────┐
-│  OpenClaw    │◄──────────────►│  keychat-openclaw  │◄───────────►│  Relays  │
+│  OpenClaw    │◄──────────────►│  keychat-signal-mls-bridge  │◄───────────►│  Relays  │
 │  (TypeScript │    stdin/stdout │  (Rust sidecar)     │  WebSocket  │         │
 │   plugin)    │                │                     │             │         │
 └──────────────┘                └─────────────────────┘             └─────────┘
@@ -151,7 +151,7 @@ Generate an NWC connection string from your wallet app (Keychat, Alby Hub, Mutin
 
 ### Bridge not starting
 
-- Ensure the binary exists: `ls bridge/target/release/keychat-openclaw`
+- Ensure the binary exists: `ls bridge/target/release/keychat-signal-mls-bridge`
 - Rebuild: `cd bridge && cargo build --release`
 - Check logs for startup errors
 

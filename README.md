@@ -17,7 +17,7 @@ openclaw plugins install @keychat-io/keychat-openclaw
 openclaw gateway restart
 ```
 
-The bridge binary is auto-downloaded on first start. Supported platforms: macOS (ARM/x64), Linux (x64/ARM64).
+Supported platforms: macOS (ARM/x64), Linux (x64/ARM64).
 
 ### Option B: Shell script
 

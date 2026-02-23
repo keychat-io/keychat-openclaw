@@ -125,7 +125,7 @@ Generate an NWC connection string from your wallet app (Keychat, Alby Hub, Mutin
 - **Sovereign Identity**: Agent generates its own keypair — no third-party identity provider
 - **Key Storage**: Mnemonic stored in system keychain (macOS Keychain, Linux secret service)
 - **Sending Address Rotation**: Each outbound message uses a fresh Nostr keypair, preventing metadata correlation
-- **Receiving Address Rotation**: Ratchet-derived addresses rotate per message, preventing traffic analysis
+- **Receiving Address Rotation**: Ratchet-derived addresses rotate almost per message, preventing traffic analysis
 
 ## Troubleshooting
 

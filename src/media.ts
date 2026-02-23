@@ -1,6 +1,7 @@
 import { createDecipheriv, createCipheriv, randomBytes, createHash } from "node:crypto";
 import { writeFile, mkdir, readFile } from "node:fs/promises";
 import { join, extname, basename } from "node:path";
+import { MEDIA_DIR } from "./paths.js";
 
 export interface KeychatMediaInfo {
   url: string;
@@ -179,10 +180,9 @@ export async function downloadAndDecrypt(media: KeychatMediaInfo): Promise<strin
   const decipher = createDecipheriv("aes-256-ctr", keyBuf, ivBuf);
   const decrypted = Buffer.concat([decipher.update(encrypted)]);
 
-  const mediaDir = join(process.env.HOME || "~", ".openclaw", "keychat", "media");
-  await mkdir(mediaDir, { recursive: true });
+  await mkdir(MEDIA_DIR, { recursive: true });
   const filename = media.sourceName || `${Date.now()}.${media.suffix}`;
-  const filepath = join(mediaDir, filename);
+  const filepath = join(MEDIA_DIR, filename);
   await writeFile(filepath, decrypted);
 
   return filepath;

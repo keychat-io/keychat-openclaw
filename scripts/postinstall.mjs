@@ -2,11 +2,12 @@
 /**
  * postinstall — download pre-compiled keychat-openclaw binary.
  * Runs automatically after `npm install` / `openclaw plugins install`.
+ * Uses native fetch/https — no child_process dependency.
  */
-import { existsSync, mkdirSync, chmodSync } from "node:fs";
+import { existsSync, mkdirSync, chmodSync, writeFileSync } from "node:fs";
 import { join, dirname } from "node:path";
-import { execSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import https from "node:https";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const REPO = "keychat-io/keychat-openclaw";
@@ -38,9 +39,30 @@ if (!artifact) {
 const url = `https://github.com/${REPO}/releases/latest/download/${artifact}`;
 console.log(`[keychat] Downloading ${artifact}...`);
 
+/**
+ * Download a URL following redirects, return a Buffer.
+ */
+function download(downloadUrl) {
+  return new Promise((resolve, reject) => {
+    https.get(downloadUrl, (res) => {
+      if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+        return download(res.headers.location).then(resolve, reject);
+      }
+      if (res.statusCode !== 200) {
+        return reject(new Error(`HTTP ${res.statusCode}`));
+      }
+      const chunks = [];
+      res.on("data", (chunk) => chunks.push(chunk));
+      res.on("end", () => resolve(Buffer.concat(chunks)));
+      res.on("error", reject);
+    }).on("error", reject);
+  });
+}
+
 try {
   mkdirSync(BINARY_DIR, { recursive: true });
-  execSync(`curl -fSL "${url}" -o "${BINARY_PATH}"`, { stdio: "pipe" });
+  const buffer = await download(url);
+  writeFileSync(BINARY_PATH, buffer);
   chmodSync(BINARY_PATH, 0o755);
   console.log("[keychat] ✅ Binary installed");
 } catch (err) {
@@ -50,24 +72,6 @@ try {
 }
 
 // Auto-initialize config if not set
-try {
-  const result = execSync("openclaw config get channels.keychat", {
-    stdio: "pipe",
-    encoding: "utf-8",
-  }).trim();
-  if (result && result !== "undefined" && result !== "null") {
-    console.log("[keychat] Config already exists, skipping init");
-  } else {
-    throw new Error("no config");
-  }
-} catch {
-  console.log("[keychat] Initializing default config...");
-  try {
-    execSync('openclaw config set channels.keychat.enabled true', { stdio: "pipe" });
-    console.log("[keychat] ✅ Config initialized (channels.keychat.enabled = true)");
-    console.log("[keychat] Restart gateway to activate: openclaw gateway restart");
-  } catch (e) {
-    console.warn(`[keychat] Could not auto-configure: ${e.message}`);
-    console.warn('[keychat] Run manually: openclaw config set channels.keychat.enabled true');
-  }
-}
+// Note: openclaw CLI config commands removed to avoid child_process.
+// Users should run: openclaw config set channels.keychat.enabled true
+console.log("[keychat] Run to activate: openclaw config set channels.keychat.enabled true && openclaw gateway restart");

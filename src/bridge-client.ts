@@ -7,6 +7,7 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { createInterface, type Interface } from "node:readline";
 import { join } from "node:path";
 import { existsSync } from "node:fs";
+import { bridgeEnv } from "./paths.js";
 
 export interface AccountInfo {
   pubkey_hex: string;
@@ -118,7 +119,7 @@ export class KeychatBridgeClient {
 
     this.process = spawn(this.bridgePath, [], {
       stdio: ["pipe", "pipe", "pipe"],
-      env: { ...process.env, RUST_LOG: "info" },
+      env: bridgeEnv(),
     });
 
     this.readline = createInterface({

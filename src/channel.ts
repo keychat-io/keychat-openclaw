@@ -36,7 +36,8 @@ import {
 import { storeMnemonic, retrieveMnemonic } from "./keychain.js";
 import { parseMediaUrl, downloadAndDecrypt, encryptAndUpload } from "./media.js";
 import { join } from "node:path";
-import { existsSync } from "node:fs";
+import { existsSync, mkdirSync } from "node:fs";
+import { signalDbPath, qrCodePath, WORKSPACE_KEYCHAT_DIR } from "./paths.js";
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Task 7: Outbound message queue for offline/retry resilience
@@ -637,7 +638,7 @@ export const keychatPlugin: ChannelPlugin<ResolvedKeychatAccount> = {
 
       // Check Signal DB exists for each account
       for (const account of accounts) {
-        const dbPath = join(process.env.HOME || "~", ".openclaw", "keychat", `signal-${account.accountId}.db`);
+        const dbPath = signalDbPath(account.accountId);
         if (!existsSync(dbPath)) {
           issues.push({
             channel: "keychat",
@@ -794,13 +795,12 @@ export const keychatPlugin: ChannelPlugin<ResolvedKeychatAccount> = {
 
       // 6. Log the agent's Keychat ID for the owner
       const contactUrl = `https://www.keychat.io/u/?k=${info.pubkey_npub}`;
-      const qrPath = join(process.env.HOME || "~", ".openclaw", "workspace", "keychat", `qr-${account.accountId}.png`);
+      const qrPath = qrCodePath(account.accountId);
 
       // Generate QR code (best-effort)
       let qrSaved = false;
       try {
-        const { mkdirSync } = await import("node:fs");
-        mkdirSync(join(process.env.HOME || "~", ".openclaw", "workspace", "keychat"), { recursive: true });
+        mkdirSync(WORKSPACE_KEYCHAT_DIR, { recursive: true });
         const QRCode = await import("qrcode");
         await QRCode.toFile(qrPath, contactUrl, { width: 256 });
         qrSaved = true;
@@ -823,17 +823,13 @@ export const keychatPlugin: ChannelPlugin<ResolvedKeychatAccount> = {
 
       // Notify agent so it can relay the link to the owner on any active channel
       try {
-        const { execFile } = await import("node:child_process");
-        const { promisify } = await import("node:util");
-        const execFileAsync = promisify(execFile);
-        await execFileAsync("openclaw", [
-          "system", "event",
-          "--text", `[Keychat Plugin] Agent "${displayName}" (account: ${account.accountId}) is online and ready.\n` +
-            `Use the keychat_identity tool to get the agent's Keychat ID, contact link, and QR code.\n` +
-            `Then send the contact info to the user on their active channel using the message tool.\n` +
-            `The user can open the link or scan the QR code in Keychat app to add this agent as a contact.`,
-          "--mode", "now",
-        ], { timeout: 10_000 });
+        const { sendSystemEvent } = await import("./notify.js");
+        await sendSystemEvent(
+          `[Keychat Plugin] Agent "${displayName}" (account: ${account.accountId}) is online and ready.\n` +
+          `Use the keychat_identity tool to get the agent's Keychat ID, contact link, and QR code.\n` +
+          `Then send the contact info to the user on their active channel using the message tool.\n` +
+          `The user can open the link or scan the QR code in Keychat app to add this agent as a contact.`,
+        );
       } catch {
         // Best-effort: if openclaw CLI not available or event fails, just log
         ctx.log?.warn?.(`[${account.accountId}] Failed to send system event notification`);
@@ -2512,7 +2508,7 @@ export function getContactInfo(accountId: string = DEFAULT_ACCOUNT_ID): {
   return {
     npub: info.pubkey_npub,
     contactUrl: `https://www.keychat.io/u/?k=${info.pubkey_npub}`,
-    qrCodePath: join(process.env.HOME || "~", ".openclaw", "workspace", "keychat", `qr-${accountId}.png`),
+    qrCodePath: qrCodePath(accountId),
   };
 }
 
@@ -2537,7 +2533,7 @@ export function getAllAgentContacts(): Array<{
       accountId,
       npub: info.pubkey_npub,
       contactUrl: `https://www.keychat.io/u/?k=${info.pubkey_npub}`,
-      qrCodePath: join(process.env.HOME || "~", ".openclaw", "workspace", "keychat", `qr-${accountId}.png`),
+      qrCodePath: qrCodePath(accountId),
     });
   }
   return results;

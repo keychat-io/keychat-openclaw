@@ -1,11 +1,11 @@
 /**
  * Auto-download the keychat-openclaw bridge binary if missing.
  * Called before bridge startup. Downloads from GitHub Releases.
+ * Uses native fetch — no child_process dependency.
  */
 
-import { existsSync, mkdirSync, chmodSync } from "node:fs";
+import { existsSync, mkdirSync, chmodSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { execSync } from "node:child_process";
 
 const REPO = "keychat-io/keychat-openclaw";
 
@@ -47,10 +47,12 @@ export async function ensureBinary(): Promise<string> {
   mkdirSync(dir, { recursive: true });
 
   try {
-    execSync(`curl -fSL "${url}" -o "${binaryPath}"`, {
-      stdio: "pipe",
-      timeout: 120_000,
-    });
+    const response = await fetch(url, { redirect: "follow" });
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+    }
+    const buffer = Buffer.from(await response.arrayBuffer());
+    writeFileSync(binaryPath, buffer);
     chmodSync(binaryPath, 0o755);
     console.log("[keychat] ✅ Bridge binary downloaded");
     return binaryPath;

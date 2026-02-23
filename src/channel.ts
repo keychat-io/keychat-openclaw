@@ -714,7 +714,7 @@ export const keychatPlugin: ChannelPlugin<ResolvedKeychatAccount> = {
       ctx.log?.info(`[${account.accountId}] Bridge sidecar started`);
 
       // 2. Initialize Signal Protocol DB
-      const dbPath = `~/.openclaw/keychat-signal-${account.accountId}.db`;
+      const dbPath = `~/.openclaw/keychat/signal-${account.accountId}.db`;
       await bridge.init(dbPath);
       ctx.log?.info(`[${account.accountId}] Signal DB initialized`);
 

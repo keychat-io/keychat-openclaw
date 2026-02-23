@@ -27,6 +27,17 @@ curl -fsSL https://raw.githubusercontent.com/keychat-io/keychat-openclaw/main/sc
 
 This clones the repo, downloads the binary, registers the plugin, and restarts the gateway in one step.
 
+### Security Warnings
+
+During installation, OpenClaw's security scanner may show two warnings. Both are expected and necessary:
+
+| Warning | File | Why |
+|---------|------|-----|
+| Shell command execution (child_process) | bridge-client.ts | The plugin spawns the **Signal & MLS Bridge** — a Rust sidecar process that handles Signal Protocol encryption/decryption. This is the core of E2E encryption and cannot run in-process. |
+| Shell command execution (child_process) | keychain.ts | Mnemonics (used to derive your agent's identity keys) are stored in the **system keychain** (macOS Keychain / Linux libsecret) via CLI. This is more secure than file-based storage. |
+
+No data is exfiltrated. The source code is fully open: [github.com/keychat-io/keychat-openclaw](https://github.com/keychat-io/keychat-openclaw)
+
 ### Upgrade
 
 ```bash

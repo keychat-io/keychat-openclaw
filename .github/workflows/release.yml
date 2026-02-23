@@ -26,6 +26,9 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
+      - name: Install protoc
+        run: sudo apt-get install -y protobuf-compiler
+
       - name: Install zig & cargo-zigbuild
         run: |
           pip3 install ziglang
@@ -57,6 +60,9 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
+
+      - name: Install protoc
+        run: brew install protobuf
 
       - name: Build
         working-directory: bridge

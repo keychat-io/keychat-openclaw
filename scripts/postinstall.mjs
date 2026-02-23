@@ -96,7 +96,7 @@ try {
   // Don't fail install — user can build manually
 }
 
-// Auto-initialize config if channels["keychat-bridge"] not set
+// Auto-initialize config if channels["keychat"] not set
 import { homedir } from "node:os";
 
 const configPath = join(homedir(), ".openclaw", "openclaw.json");
@@ -106,18 +106,18 @@ try {
     config = JSON.parse(readFileSync(configPath, "utf-8"));
   }
 
-  if (config.channels?.["keychat-bridge"] || config.channels?.keychat) {
+  if (config.channels?.["keychat"] || config.channels?.keychat) {
     console.log("[keychat] Config already contains keychat settings, skipping init");
     // Migrate old channels.keychat → channels.keychat
-    if (config.channels?.keychat && !config.channels?.["keychat-bridge"]) {
-      config.channels["keychat-bridge"] = config.channels.keychat;
+    if (config.channels?.keychat && !config.channels?.["keychat"]) {
+      config.channels["keychat"] = config.channels.keychat;
       delete config.channels.keychat;
       writeFileSync(configPath, JSON.stringify(config, null, 2) + "\n", "utf-8");
       console.log("[keychat] ✅ Migrated channels.keychat → channels.keychat");
     }
   } else {
     if (!config.channels) config.channels = {};
-    config.channels["keychat-bridge"] = { enabled: true, dmPolicy: "open" };
+    config.channels["keychat"] = { enabled: true, dmPolicy: "open" };
     writeFileSync(configPath, JSON.stringify(config, null, 2) + "\n", "utf-8");
     console.log('[keychat] ✅ Config initialized (channels.keychat.enabled = true)');
     console.log("[keychat] Restart gateway to activate: openclaw gateway restart");

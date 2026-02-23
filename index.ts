@@ -2,7 +2,87 @@ import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
 import { emptyPluginConfigSchema } from "openclaw/plugin-sdk";
 import { keychatPlugin, getAgentKeychatId, getAgentKeychatUrl, getAllAgentContacts } from "./src/channel.js";
 import { setKeychatRuntime } from "./src/runtime.js";
-import { existsSync } from "node:fs";
+import { existsSync, mkdirSync, chmodSync, writeFileSync, readFileSync } from "node:fs";
+import { join, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
+import { homedir } from "node:os";
+import https from "node:https";
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
+
+/** Download a URL following redirects, return a Buffer. */
+function downloadBinary(url: string): Promise<Buffer> {
+  return new Promise((resolve, reject) => {
+    https.get(url, (res) => {
+      if (res.statusCode && res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+        return downloadBinary(res.headers.location).then(resolve, reject);
+      }
+      if (res.statusCode !== 200) {
+        return reject(new Error(`HTTP ${res.statusCode}`));
+      }
+      const chunks: Buffer[] = [];
+      res.on("data", (chunk: Buffer) => chunks.push(chunk));
+      res.on("end", () => resolve(Buffer.concat(chunks)));
+      res.on("error", reject);
+    }).on("error", reject);
+  });
+}
+
+/** Ensure bridge binary exists, download if missing. */
+async function ensureBinary(): Promise<void> {
+  const binaryDir = join(__dirname, "bridge", "target", "release");
+  const binaryPath = join(binaryDir, "keychat-openclaw");
+
+  if (existsSync(binaryPath)) return;
+
+  const platform = process.platform;
+  const arch = process.arch;
+  const artifacts: Record<string, string> = {
+    "darwin-arm64": "keychat-openclaw-darwin-arm64",
+    "darwin-x64": "keychat-openclaw-darwin-x64",
+    "linux-x64": "keychat-openclaw-linux-x64",
+    "linux-arm64": "keychat-openclaw-linux-arm64",
+  };
+
+  const artifact = artifacts[`${platform}-${arch}`];
+  if (!artifact) {
+    console.warn(`[keychat] No pre-compiled binary for ${platform}-${arch}. Build from source: cd bridge && cargo build --release`);
+    return;
+  }
+
+  const url = `https://github.com/keychat-io/keychat-openclaw/releases/latest/download/${artifact}`;
+  console.log(`[keychat] Bridge binary not found, downloading ${artifact}...`);
+
+  try {
+    mkdirSync(binaryDir, { recursive: true });
+    const buffer = await downloadBinary(url);
+    writeFileSync(binaryPath, buffer);
+    chmodSync(binaryPath, 0o755);
+    console.log("[keychat] ✅ Bridge binary installed");
+  } catch (err: any) {
+    console.warn(`[keychat] Binary download failed: ${err.message}`);
+    console.warn("[keychat] Build from source: cd bridge && cargo build --release");
+  }
+}
+
+/** Ensure channels.keychat exists in openclaw.json config. */
+function ensureConfig(): void {
+  const configPath = join(homedir(), ".openclaw", "openclaw.json");
+  try {
+    let config: any = {};
+    if (existsSync(configPath)) {
+      config = JSON.parse(readFileSync(configPath, "utf-8"));
+    }
+    if (config.channels?.keychat) return;
+
+    if (!config.channels) config.channels = {};
+    config.channels.keychat = { enabled: true, dmPolicy: "open" };
+    writeFileSync(configPath, JSON.stringify(config, null, 2) + "\n", "utf-8");
+    console.log("[keychat] ✅ Config initialized (channels.keychat.enabled = true)");
+  } catch (err: any) {
+    console.warn(`[keychat] Could not auto-configure: ${err.message}`);
+  }
+}
 
 const plugin = {
   id: "keychat",
@@ -14,6 +94,9 @@ const plugin = {
   register(api: OpenClawPluginApi) {
     console.log("[keychat] register() called");
     try {
+      // Auto-setup: download binary + init config on first load
+      ensureConfig();
+      ensureBinary().catch((err) => console.warn("[keychat] ensureBinary error:", err));
       setKeychatRuntime(api.runtime);
       console.log("[keychat] runtime set, registering channel...");
       api.registerChannel({ plugin: keychatPlugin });

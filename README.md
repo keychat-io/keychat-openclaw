@@ -27,16 +27,6 @@ curl -fsSL https://raw.githubusercontent.com/keychat-io/keychat-openclaw/main/sc
 
 This clones the repo, downloads the binary, registers the plugin, and restarts the gateway in one step.
 
-### Post-install setup
-
-If you installed via Option A and the bridge binary or config wasn't initialized automatically, run:
-
-```bash
-bash ~/.openclaw/extensions/keychat-openclaw/scripts/setup.sh
-```
-
-This downloads the binary and adds `channels.keychat` to your config.
-
 ### Security Warnings
 
 During installation, OpenClaw's security scanner may show three warnings. All are expected:

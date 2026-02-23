@@ -19,13 +19,23 @@ openclaw gateway restart
 
 Supported platforms: macOS (ARM/x64), Linux (x64/ARM64).
 
-### Option B: Shell script
+### Option B: Shell script (full install)
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/keychat-io/keychat-openclaw/main/scripts/install.sh | bash
 ```
 
 This clones the repo, downloads the binary, registers the plugin, and restarts the gateway in one step.
+
+### Post-install setup
+
+If you installed via Option A and the bridge binary or config wasn't initialized automatically, run:
+
+```bash
+bash ~/.openclaw/extensions/keychat-openclaw/scripts/setup.sh
+```
+
+This downloads the binary and adds `channels.keychat` to your config.
 
 ### Security Warnings
 

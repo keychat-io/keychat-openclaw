@@ -11,7 +11,7 @@ Your agent becomes a full Keychat citizen: it can receive friend requests, estab
 ## Install
 
 ```bash
-openclaw plugins install @keychat-io/keychat-openclaw
+openclaw plugins install @keychat-io/keychat
 openclaw gateway restart
 ```
 
@@ -22,7 +22,7 @@ Supported platforms: macOS (ARM/x64), Linux (x64/ARM64).
 Alternatively, install via shell script:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/keychat-io/keychat-openclaw/main/scripts/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/keychat-io/keychat/main/scripts/install.sh | bash
 ```
 
 ### Security Warnings
@@ -35,14 +35,14 @@ During installation, OpenClaw's security scanner may show three warnings. All ar
 | Shell command execution (keychain.ts) | Stores identity mnemonics in the OS keychain (macOS Keychain / Linux libsecret). |
 | Shell command execution (notify.ts) | Notifies the agent on startup so it can send the Keychat ID and QR code to the user. |
 
-Source code is fully open: [github.com/keychat-io/keychat-openclaw](https://github.com/keychat-io/keychat-openclaw)
+Source code is fully open: [github.com/keychat-io/keychat](https://github.com/keychat-io/keychat)
 
 ### Upgrade
 
 Tell your agent "upgrade keychat" in any chat, or manually:
 
 ```bash
-openclaw plugins install @keychat-io/keychat-openclaw@latest
+openclaw plugins install @keychat-io/keychat@latest
 openclaw gateway restart
 ```
 
@@ -103,7 +103,7 @@ Generate an NWC connection string from your wallet app (Keychat, Alby Hub, Mutin
 
 ```
 ┌──────────────┐    JSON-RPC     ┌─────────────────────┐    Nostr     ┌─────────┐
-│  OpenClaw    │◄──────────────►│  keychat-openclaw  │◄───────────►│  Relays  │
+│  OpenClaw    │◄──────────────►│  keychat  │◄───────────►│  Relays  │
 │  (TypeScript │    stdin/stdout │  (Rust sidecar)     │  WebSocket  │         │
 │   plugin)    │                │                     │             │         │
 └──────────────┘                └─────────────────────┘             └─────────┘
@@ -129,7 +129,7 @@ Generate an NWC connection string from your wallet app (Keychat, Alby Hub, Mutin
 
 ## Troubleshooting
 
-- **Bridge not starting**: Check `ls ~/.openclaw/extensions/keychat-openclaw/bridge/target/release/keychat-openclaw`. If missing, restart gateway (auto-downloads) or build from source: `cd bridge && cargo build --release`
+- **Bridge not starting**: Check `ls ~/.openclaw/extensions/keychat/bridge/target/release/keychat`. If missing, restart gateway (auto-downloads) or build from source: `cd bridge && cargo build --release`
 - **Relay issues**: Verify relay URLs (`wss://...`), try alternative relays
 - **Decryption errors**: Peer should delete old contact and re-add the agent
 - **Messages not delivered**: Plugin queues failed messages (up to 100) and retries every 30s

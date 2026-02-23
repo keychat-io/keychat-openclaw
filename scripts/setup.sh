@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Keychat OpenClaw plugin setup
 # Downloads the bridge binary and initializes config.
-# Run after: openclaw plugins install @keychat-io/keychat-openclaw
+# Run after: openclaw plugins install @keychat-io/keychat
 set -euo pipefail
 
 # --- Locate plugin directory ---
@@ -11,8 +11,8 @@ PLUGIN_DIR="$(dirname "$SCRIPT_DIR")"
 # Also check common install locations
 if [ ! -f "$PLUGIN_DIR/package.json" ]; then
   for d in \
-    "$HOME/.openclaw/extensions/keychat-openclaw" \
-    "$HOME/.openclaw/plugins/@keychat-io/keychat-openclaw"; do
+    "$HOME/.openclaw/extensions/keychat" \
+    "$HOME/.openclaw/plugins/@keychat-io/keychat"; do
     if [ -f "$d/package.json" ]; then
       PLUGIN_DIR="$d"
       break
@@ -21,7 +21,7 @@ if [ ! -f "$PLUGIN_DIR/package.json" ]; then
 fi
 
 BINARY_DIR="$PLUGIN_DIR/bridge/target/release"
-BINARY_PATH="$BINARY_DIR/keychat-openclaw"
+BINARY_PATH="$BINARY_DIR/keychat-bridge"
 
 # --- Download binary ---
 if [ -f "$BINARY_PATH" ]; then
@@ -32,10 +32,10 @@ else
   ARCH="$(uname -m)"
 
   case "$OS-$ARCH" in
-    darwin-arm64)  ARTIFACT="keychat-openclaw-darwin-arm64" ;;
-    darwin-x86_64) ARTIFACT="keychat-openclaw-darwin-x64" ;;
-    linux-x86_64)  ARTIFACT="keychat-openclaw-linux-x64" ;;
-    linux-aarch64) ARTIFACT="keychat-openclaw-linux-arm64" ;;
+    darwin-arm64)  ARTIFACT="keychat-bridge-darwin-arm64" ;;
+    darwin-x86_64) ARTIFACT="keychat-bridge-darwin-x64" ;;
+    linux-x86_64)  ARTIFACT="keychat-bridge-linux-x64" ;;
+    linux-aarch64) ARTIFACT="keychat-bridge-linux-arm64" ;;
     *)
       echo "[keychat] ❌ No pre-compiled binary for $OS-$ARCH"
       echo "[keychat] Build from source: cd $PLUGIN_DIR/bridge && cargo build --release"

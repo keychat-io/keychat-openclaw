@@ -1,5 +1,5 @@
 {
-  "name": "@keychat-io/keychat-openclaw",
+  "name": "@keychat-io/keychat",
   "version": "0.1.17",
   "description": "Keychat — E2E encrypted chat + Lightning wallet for OpenClaw agents",
   "license": "AGPL-3.0",
@@ -21,7 +21,7 @@
       "./index.ts"
     ],
     "channel": {
-      "id": "keychat-openclaw",
+      "id": "keychat",
       "label": "Keychat",
       "selectionLabel": "Keychat (E2E Encrypted)",
       "docsPath": "/channels/keychat",

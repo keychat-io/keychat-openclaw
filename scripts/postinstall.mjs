@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * postinstall — download pre-compiled keychat-openclaw binary.
+ * postinstall — download pre-compiled keychat-bridge binary.
  * Runs automatically after `npm install` / `openclaw plugins install`.
  * Uses native fetch/https — no child_process dependency.
  */
@@ -12,7 +12,7 @@ import https from "node:https";
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const REPO = "keychat-io/keychat-openclaw";
 const BINARY_DIR = join(__dirname, "..", "bridge", "target", "release");
-const BINARY_PATH = join(BINARY_DIR, "keychat-openclaw");
+const BINARY_PATH = join(BINARY_DIR, "keychat-bridge");
 
 import { statSync } from "node:fs";
 
@@ -29,7 +29,7 @@ const currentVersion = existsSync(versionFile)
 const pluginDir = join(__dirname, "..");
 const pluginDirName = pluginDir.split("/").pop();
 const scriptInstallDir = join(pluginDir, "..", "keychat");
-if (pluginDirName === "keychat-openclaw" && existsSync(scriptInstallDir)) {
+if (pluginDirName === "keychat-bridge" && existsSync(scriptInstallDir)) {
   console.log(`[keychat] Removing conflicting script-installed copy...`);
   try { rmSync(scriptInstallDir, { recursive: true, force: true }); } catch {}
 }
@@ -47,10 +47,10 @@ const platform = process.platform; // darwin, linux
 const arch = process.arch; // arm64, x64
 
 const ARTIFACTS = {
-  "darwin-arm64": "keychat-openclaw-darwin-arm64",
-  "darwin-x64": "keychat-openclaw-darwin-x64",
-  "linux-x64": "keychat-openclaw-linux-x64",
-  "linux-arm64": "keychat-openclaw-linux-arm64",
+  "darwin-arm64": "keychat-bridge-darwin-arm64",
+  "darwin-x64": "keychat-bridge-darwin-x64",
+  "linux-x64": "keychat-bridge-linux-x64",
+  "linux-arm64": "keychat-bridge-linux-arm64",
 };
 
 const artifact = ARTIFACTS[`${platform}-${arch}`];
@@ -96,7 +96,7 @@ try {
   // Don't fail install — user can build manually
 }
 
-// Auto-initialize config if channels["keychat-openclaw"] not set
+// Auto-initialize config if channels["keychat-bridge"] not set
 import { homedir } from "node:os";
 
 const configPath = join(homedir(), ".openclaw", "openclaw.json");
@@ -106,23 +106,23 @@ try {
     config = JSON.parse(readFileSync(configPath, "utf-8"));
   }
 
-  if (config.channels?.["keychat-openclaw"] || config.channels?.keychat) {
+  if (config.channels?.["keychat-bridge"] || config.channels?.keychat) {
     console.log("[keychat] Config already contains keychat settings, skipping init");
-    // Migrate old channels.keychat → channels.keychat-openclaw
-    if (config.channels?.keychat && !config.channels?.["keychat-openclaw"]) {
-      config.channels["keychat-openclaw"] = config.channels.keychat;
+    // Migrate old channels.keychat → channels.keychat
+    if (config.channels?.keychat && !config.channels?.["keychat-bridge"]) {
+      config.channels["keychat-bridge"] = config.channels.keychat;
       delete config.channels.keychat;
       writeFileSync(configPath, JSON.stringify(config, null, 2) + "\n", "utf-8");
-      console.log("[keychat] ✅ Migrated channels.keychat → channels.keychat-openclaw");
+      console.log("[keychat] ✅ Migrated channels.keychat → channels.keychat");
     }
   } else {
     if (!config.channels) config.channels = {};
-    config.channels["keychat-openclaw"] = { enabled: true, dmPolicy: "open" };
+    config.channels["keychat-bridge"] = { enabled: true, dmPolicy: "open" };
     writeFileSync(configPath, JSON.stringify(config, null, 2) + "\n", "utf-8");
-    console.log('[keychat] ✅ Config initialized (channels.keychat-openclaw.enabled = true)');
+    console.log('[keychat] ✅ Config initialized (channels.keychat.enabled = true)');
     console.log("[keychat] Restart gateway to activate: openclaw gateway restart");
   }
 } catch (err) {
   console.warn(`[keychat] Could not auto-configure: ${err.message}`);
-  console.warn('[keychat] Run manually: openclaw config set channels.keychat-openclaw.enabled true');
+  console.warn('[keychat] Run manually: openclaw config set channels.keychat.enabled true');
 }

@@ -31,17 +31,17 @@ function downloadBinary(url: string): Promise<Buffer> {
 /** Ensure bridge binary exists, download if missing. */
 async function ensureBinary(): Promise<void> {
   const binaryDir = join(__dirname, "bridge", "target", "release");
-  const binaryPath = join(binaryDir, "keychat-openclaw");
+  const binaryPath = join(binaryDir, "keychat-bridge");
 
   if (existsSync(binaryPath)) return;
 
   const platform = process.platform;
   const arch = process.arch;
   const artifacts: Record<string, string> = {
-    "darwin-arm64": "keychat-openclaw-darwin-arm64",
-    "darwin-x64": "keychat-openclaw-darwin-x64",
-    "linux-x64": "keychat-openclaw-linux-x64",
-    "linux-arm64": "keychat-openclaw-linux-arm64",
+    "darwin-arm64": "keychat-bridge-darwin-arm64",
+    "darwin-x64": "keychat-bridge-darwin-x64",
+    "linux-x64": "keychat-bridge-linux-x64",
+    "linux-arm64": "keychat-bridge-linux-arm64",
   };
 
   const artifact = artifacts[`${platform}-${arch}`];

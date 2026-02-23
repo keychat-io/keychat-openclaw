@@ -101,7 +101,7 @@ export class KeychatBridgeClient {
         "bridge",
         "target",
         "release",
-        "keychat-openclaw",
+        "keychat-bridge",
       );
   }
 
@@ -113,7 +113,7 @@ export class KeychatBridgeClient {
 
     if (!existsSync(this.bridgePath)) {
       throw new Error(
-        `keychat-openclaw binary not found at ${this.bridgePath}. Run 'cargo build --release' in the bridge directory.`,
+        `keychat-bridge binary not found at ${this.bridgePath}. Run 'cargo build --release' in the bridge directory.`,
       );
     }
 
@@ -163,7 +163,7 @@ export class KeychatBridgeClient {
       // Bridge logs go to stderr — forward to OpenClaw logger
       const msg = data.toString().trim();
       if (msg) {
-        console.error(`[keychat-openclaw] ${msg}`);
+        console.error(`[keychat] ${msg}`);
       }
     });
 
@@ -179,7 +179,7 @@ export class KeychatBridgeClient {
       // Auto-restart on unexpected exit
       if (this.autoRestart && code !== 0) {
         const delay = Math.min(this.restartDelayMs * Math.pow(2, this.restartAttempts), 30000);
-        console.error(`[keychat-openclaw] Unexpected exit (code=${code}), restarting in ${delay}ms (attempt ${this.restartAttempts + 1}/${this.maxRestartAttempts})`);
+        console.error(`[keychat] Unexpected exit (code=${code}), restarting in ${delay}ms (attempt ${this.restartAttempts + 1}/${this.maxRestartAttempts})`);
         setTimeout(() => this.restart(), delay);
       }
     });
@@ -209,7 +209,7 @@ export class KeychatBridgeClient {
   /** Restart the bridge after an unexpected crash. */
   private async restart(): Promise<void> {
     if (this.restartAttempts >= this.maxRestartAttempts) {
-      console.error(`[keychat-openclaw] Max restart attempts (${this.maxRestartAttempts}) reached, giving up`);
+      console.error(`[keychat] Max restart attempts (${this.maxRestartAttempts}) reached, giving up`);
       return;
     }
     this.restartAttempts++;
@@ -226,13 +226,13 @@ export class KeychatBridgeClient {
         try {
           await this.onRestartComplete();
         } catch (err) {
-          console.error(`[keychat-openclaw] Post-restart hook failed: ${err}`);
+          console.error(`[keychat] Post-restart hook failed: ${err}`);
         }
       }
       this.restartAttempts = 0;
-      console.error(`[keychat-openclaw] Restart successful (sessions restored)`);
+      console.error(`[keychat] Restart successful (sessions restored)`);
     } catch (err) {
-      console.error(`[keychat-openclaw] Restart failed: ${err}`);
+      console.error(`[keychat] Restart failed: ${err}`);
     }
   }
 
@@ -256,13 +256,13 @@ export class KeychatBridgeClient {
         try {
           const result = await this.call("relay_health_check") as { reconnected?: boolean };
           if (result?.reconnected) {
-            console.log(`[keychat-openclaw] Relay health check: reconnected and resubscribed`);
+            console.log(`[keychat] Relay health check: reconnected and resubscribed`);
           }
         } catch (relayErr) {
-          console.warn(`[keychat-openclaw] Relay health check failed: ${relayErr}`);
+          console.warn(`[keychat] Relay health check failed: ${relayErr}`);
         }
       } catch {
-        console.error(`[keychat-openclaw] Health check failed — killing stale process`);
+        console.error(`[keychat] Health check failed — killing stale process`);
         try { this.process?.kill(); } catch { /* ignore */ }
         // Auto-restart will trigger from the exit handler
       }

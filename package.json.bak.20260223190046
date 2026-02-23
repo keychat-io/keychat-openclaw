@@ -21,7 +21,7 @@
       "./index.ts"
     ],
     "channel": {
-      "id": "keychat-openclaw",
+      "id": "keychat",
       "label": "Keychat",
       "selectionLabel": "Keychat (E2E Encrypted)",
       "docsPath": "/channels/keychat",

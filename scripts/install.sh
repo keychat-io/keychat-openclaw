@@ -4,18 +4,11 @@
 set -e
 
 REPO="keychat-io/keychat-openclaw"
-INSTALL_DIR="${OPENCLAW_EXTENSIONS:-$HOME/.openclaw/extensions}/keychat-openclaw"
+INSTALL_DIR="${OPENCLAW_EXTENSIONS:-$HOME/.openclaw/extensions}/keychat"
 BINARY="$INSTALL_DIR/bridge/target/release/keychat-openclaw"
 
 echo "🔑 Installing Keychat"
 echo ""
-
-# ── Clean up old directory name ──
-OLD_DIR="${OPENCLAW_EXTENSIONS:-$HOME/.openclaw/extensions}/keychat"
-if [ -d "$OLD_DIR" ] && [ "$INSTALL_DIR" != "$OLD_DIR" ]; then
-  echo "🧹 Migrating from old directory ($OLD_DIR)..."
-  rm -rf "$OLD_DIR"
-fi
 
 # ── Check OpenClaw ──
 if ! command -v openclaw &>/dev/null; then
@@ -96,7 +89,7 @@ openclaw plugins install "$INSTALL_DIR" 2>&1 || true
 # ── Auto-configure ──
 CONFIG_FILE="$HOME/.openclaw/openclaw.json"
 if [ -f "$CONFIG_FILE" ]; then
-  if grep -q '"keychat-openclaw"' "$CONFIG_FILE" 2>/dev/null; then
+  if grep -q '"keychat"' "$CONFIG_FILE" 2>/dev/null; then
     echo "ℹ️  Keychat already in config"
   else
     # Insert keychat into channels object
@@ -108,13 +101,13 @@ try:
         cfg = json.load(f)
     if 'channels' not in cfg:
         cfg['channels'] = {}
-    cfg['channels']['keychat-openclaw'] = {'enabled': True}
+    cfg['channels']['keychat'] = {'enabled': True}
     with open('$CONFIG_FILE', 'w') as f:
         json.dump(cfg, f, indent=2, ensure_ascii=False)
     print('✅ Keychat enabled in config')
 except Exception as e:
     print(f'⚠️  Could not auto-configure: {e}')
-    print('   Add manually: \"keychat-openclaw\": {{\"enabled\": true}} under channels')
+    print('   Add manually: \"keychat\": {{\"enabled\": true}} under channels')
 "
     elif command -v node &>/dev/null; then
       node -e "
@@ -122,17 +115,17 @@ const fs = require('fs');
 try {
   const cfg = JSON.parse(fs.readFileSync('$CONFIG_FILE', 'utf8'));
   if (!cfg.channels) cfg.channels = {};
-  cfg.channels['keychat-openclaw'] = { enabled: true };
+  cfg.channels.keychat = { enabled: true };
   fs.writeFileSync('$CONFIG_FILE', JSON.stringify(cfg, null, 2));
   console.log('✅ Keychat enabled in config');
 } catch(e) {
   console.log('⚠️  Could not auto-configure:', e.message);
-  console.log('   Add manually: \"keychat-openclaw\": {\"enabled\": true} under channels');
+  console.log('   Add manually: \"keychat\": {\"enabled\": true} under channels');
 }
 "
     else
       echo "⚠️  Add to $CONFIG_FILE under \"channels\":"
-      echo '     "keychat-openclaw": { "enabled": true }'
+      echo '     "keychat": { "enabled": true }'
     fi
   fi
 else
@@ -143,8 +136,7 @@ fi
 # ── Restart gateway ──
 echo ""
 echo "🔄 Restarting gateway..."
-openclaw gateway install 2>&1 || true
-openclaw gateway start 2>&1 || true
+openclaw gateway restart 2>&1 || true
 
 # ── Done ──
 echo ""
@@ -157,6 +149,6 @@ echo "To connect: open the Keychat app and scan the QR code."
 echo ""
 echo "View QR code in terminal:"
 echo "  chafa ~/.openclaw/keychat/qr-default.png"
-echo "  # or: qrencode -t ANSIUTF8 \"\$(openclaw status 2>/dev/null | grep -o 'npub[a-z0-9]*' | head -1 | xargs -I{} echo 'https://www.keychat.io/u/?k={}')\""
+echo "  # or: qrencode -t ANSIUTF8 \"\$(openclaw status 2>/dev/null | grep -oP 'npub[a-z0-9]+' | head -1 | xargs -I{} echo 'https://www.keychat.io/u/?k={}')\""
 echo ""
 echo "Docs: https://github.com/$REPO"

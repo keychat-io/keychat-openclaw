@@ -19,6 +19,17 @@ That's it. The plugin automatically downloads the bridge binary and initializes 
 
 Supported platforms: macOS (ARM/x64), Linux (x64/ARM64).
 
+### Security Warnings
+
+During installation, OpenClaw will show two security warnings. **Both are expected and required:**
+
+| Warning | File | Why it's needed |
+|---------|------|----------------|
+| Shell command execution (child_process) | `bridge-client.ts` | Spawns the Rust sidecar process for Signal Protocol & MLS encryption. Keychat's cryptography runs in Rust and must be bridged to Node.js. |
+| Shell command execution (child_process) | `keychain.ts` | Stores the agent's identity mnemonic in the OS keychain (macOS Keychain / Linux libsecret) instead of plain-text files. |
+
+These warnings cannot be removed without sacrificing core functionality or security. The plugin does **not** execute arbitrary commands — it only spawns the bundled bridge binary and accesses the system keychain.
+
 Alternatively, install via shell script:
 
 ```bash

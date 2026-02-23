@@ -29,12 +29,13 @@ This clones the repo, downloads the binary, registers the plugin, and restarts t
 
 ### Security Warnings
 
-During installation, OpenClaw's security scanner may show two warnings. Both are expected:
+During installation, OpenClaw's security scanner may show three warnings. All are expected:
 
 | Warning | Reason |
 |---------|--------|
 | Shell command execution (bridge-client.ts) | Keychat's Signal Protocol and MLS Protocol encryption are implemented in Rust. The plugin spawns a Rust sidecar process to bridge between Node.js and the native crypto layer. |
 | Shell command execution (keychain.ts) | Agent identity mnemonics are stored in the OS keychain (macOS Keychain / Linux libsecret) rather than plain files, which is the more secure option. |
+| Shell command execution (notify.ts) | After startup, the plugin notifies the agent so it can proactively send the Keychat ID and QR code to the user on their active channel (Telegram, webchat, etc). |
 
 Source code is fully open: [github.com/keychat-io/keychat-openclaw](https://github.com/keychat-io/keychat-openclaw)
 

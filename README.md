@@ -40,12 +40,16 @@ Source code is fully open: [github.com/keychat-io/keychat-openclaw](https://gith
 
 ### Upgrade
 
+If you installed via **Option A**:
+
 ```bash
-# npm plugin
 openclaw plugins install @keychat-io/keychat-openclaw@latest
 openclaw gateway restart
+```
 
-# shell script (re-run the same command)
+If you installed via **Option B**:
+
+```bash
 curl -fsSL https://raw.githubusercontent.com/keychat-io/keychat-openclaw/main/scripts/install.sh | bash
 ```
 

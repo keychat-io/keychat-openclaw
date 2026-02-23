@@ -126,3 +126,16 @@ try {
   console.warn(`[keychat] Could not auto-configure: ${err.message}`);
   console.warn('[keychat] Run manually: openclaw config set channels.keychat.enabled true');
 }
+
+// Final summary
+console.log("");
+console.log("════════════════════════════════════════");
+console.log("  🎉 Keychat plugin installed!");
+console.log("════════════════════════════════════════");
+console.log("");
+console.log("Next step: restart the gateway to activate Keychat");
+console.log("");
+console.log("  openclaw gateway restart");
+console.log("");
+console.log("Your agent's Keychat ID will appear in the logs.");
+console.log("Run 'openclaw status' to see it.");

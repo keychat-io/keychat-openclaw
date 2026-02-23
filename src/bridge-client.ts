@@ -101,7 +101,7 @@ export class KeychatBridgeClient {
         "bridge",
         "target",
         "release",
-        "keychat-bridge",
+        "keychat-openclaw",
       );
   }
 
@@ -113,7 +113,7 @@ export class KeychatBridgeClient {
 
     if (!existsSync(this.bridgePath)) {
       throw new Error(
-        `keychat-bridge binary not found at ${this.bridgePath}. Run 'cargo build --release' in the bridge directory.`,
+        `keychat-openclaw binary not found at ${this.bridgePath}. Run 'cargo build --release' in the bridge directory.`,
       );
     }
 

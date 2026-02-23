@@ -21,7 +21,15 @@ Supported platforms: macOS (ARM/x64), Linux (x64/ARM64).
 
 ### Security Warnings
 
-During installation, OpenClaw will show two security warnings. **Both are expected and required:**
+During installation, OpenClaw will show the following warning:
+
+```
+WARNING: Plugin "keychat" contains dangerous code patterns:
+  Shell command execution detected (child_process) (src/bridge-client.ts)
+  Shell command execution detected (child_process) (src/keychain.ts)
+```
+
+**Both are expected and required.** Here's why:
 
 | Warning | File | Why it's needed |
 |---------|------|----------------|

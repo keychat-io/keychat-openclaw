@@ -333,9 +333,9 @@ function bech32Decode(npub: string): string | null {
 }
 
 export const keychatPlugin: ChannelPlugin<ResolvedKeychatAccount> = {
-  id: "keychat",
+  id: "keychat-openclaw",
   meta: {
-    id: "keychat",
+    id: "keychat-openclaw",
     label: "Keychat",
     selectionLabel: "Keychat (E2E Encrypted)",
     docsPath: "/channels/keychat",

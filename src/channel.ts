@@ -826,18 +826,24 @@ export const keychatPlugin: ChannelPlugin<ResolvedKeychatAccount> = {
         `═══════════════════════════════════════════════════\n`,
       );
 
-      // Notify agent so it can relay the link to the owner on any active channel
-      try {
-        const { sendSystemEvent } = await import("./notify.js");
-        await sendSystemEvent(
-          `[Keychat Plugin] Agent "${displayName}" (account: ${account.accountId}) is online and ready.\n` +
-          `Use the keychat_identity tool to get the agent's Keychat ID, contact link, and QR code.\n` +
-          `Then send the contact info to the user on their active channel using the message tool.\n` +
-          `The user can open the link or scan the QR code in Keychat app to add this agent as a contact.`,
-        );
-      } catch {
-        // Best-effort: if openclaw CLI not available or event fails, just log
-        ctx.log?.warn?.(`[${account.accountId}] Failed to send system event notification`);
+      // Notify agent on first install only (not on every restart)
+      const { KEYCHAT_DIR } = await import("./paths.js");
+      const notifiedMarker = join(KEYCHAT_DIR, `.notified-${account.accountId}`);
+      if (!existsSync(notifiedMarker)) {
+        try {
+          const { sendSystemEvent } = await import("./notify.js");
+          await sendSystemEvent(
+            `[Keychat Plugin] Agent "${displayName}" (account: ${account.accountId}) is online and ready.\n` +
+            `Use the keychat_identity tool to get the agent's Keychat ID, contact link, and QR code.\n` +
+            `Then send the contact info to the user on their active channel using the message tool.\n` +
+            `The user can open the link or scan the QR code in Keychat app to add this agent as a contact.`,
+          );
+          // Mark as notified so we don't repeat on restart
+          const { writeFileSync } = await import("node:fs");
+          writeFileSync(notifiedMarker, new Date().toISOString());
+        } catch {
+          ctx.log?.warn?.(`[${account.accountId}] Failed to send system event notification`);
+        }
       }
 
       ctx.setStatus({

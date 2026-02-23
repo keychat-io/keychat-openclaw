@@ -4,7 +4,7 @@
  * Runs automatically after `npm install` / `openclaw plugins install`.
  * Uses native fetch/https — no child_process dependency.
  */
-import { existsSync, mkdirSync, chmodSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, chmodSync, writeFileSync, readFileSync, rmSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import https from "node:https";
@@ -14,9 +14,33 @@ const REPO = "keychat-io/keychat-openclaw";
 const BINARY_DIR = join(__dirname, "..", "bridge", "target", "release");
 const BINARY_PATH = join(BINARY_DIR, "keychat-openclaw");
 
-if (existsSync(BINARY_PATH)) {
-  console.log("[keychat] Binary already exists, skipping download");
+import { statSync } from "node:fs";
+
+// Read expected version from package.json
+const pkgPath = join(__dirname, "..", "package.json");
+const pkgVersion = JSON.parse(readFileSync(pkgPath, "utf-8")).version;
+const versionFile = join(BINARY_DIR, ".version");
+
+const currentVersion = existsSync(versionFile)
+  ? readFileSync(versionFile, "utf-8").trim()
+  : null;
+
+// Clean up conflicting script-installed copy (extensions/keychat vs extensions/keychat-openclaw)
+const pluginDir = join(__dirname, "..");
+const pluginDirName = pluginDir.split("/").pop();
+const scriptInstallDir = join(pluginDir, "..", "keychat");
+if (pluginDirName === "keychat-openclaw" && existsSync(scriptInstallDir)) {
+  console.log(`[keychat] Removing conflicting script-installed copy...`);
+  try { rmSync(scriptInstallDir, { recursive: true, force: true }); } catch {}
+}
+
+if (existsSync(BINARY_PATH) && currentVersion === pkgVersion) {
+  console.log(`[keychat] Binary already exists (v${pkgVersion}), skipping download`);
   process.exit(0);
+}
+
+if (existsSync(BINARY_PATH)) {
+  console.log(`[keychat] Binary exists but version mismatch (${currentVersion || "unknown"} → ${pkgVersion}), re-downloading...`);
 }
 
 const platform = process.platform; // darwin, linux
@@ -64,7 +88,8 @@ try {
   const buffer = await download(url);
   writeFileSync(BINARY_PATH, buffer);
   chmodSync(BINARY_PATH, 0o755);
-  console.log("[keychat] ✅ Binary installed");
+  writeFileSync(versionFile, pkgVersion + "\n");
+  console.log(`[keychat] ✅ Binary installed (v${pkgVersion})`);
 } catch (err) {
   console.warn(`[keychat] Download failed: ${err.message}`);
   console.warn("[keychat] Build from source: cd bridge && cargo build --release");
@@ -72,7 +97,6 @@ try {
 }
 
 // Auto-initialize config if channels.keychat not set
-import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 
 const configPath = join(homedir(), ".openclaw", "openclaw.json");

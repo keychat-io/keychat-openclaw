@@ -60,10 +60,14 @@ curl -fsSL https://raw.githubusercontent.com/keychat-io/keychat-openclaw/main/sc
 
 ### Connect
 
-1. Run `openclaw status` — your agent's **npub** and **QR code** will be displayed
-2. Open the [Keychat app](https://keychat.io) → tap **Add Contact** on the home page
-3. Scan the QR code, or paste the npub
-4. The agent will automatically accept the friend request and establish an encrypted session
+1. After `openclaw gateway restart`, the agent logs its **npub** and a shareable link:
+   ```
+   🔑 Keychat ID: npub1...
+   📱 Add contact: https://www.keychat.io/u/?k=npub1...
+   ```
+2. Share the link with your contacts, or ask your agent "what's your Keychat ID?" in any chat
+3. Open the [Keychat app](https://keychat.io) → tap the link or paste the npub to add as contact
+4. If `dmPolicy` is `open`, the agent accepts immediately; if `pairing` (default), the owner must approve via OpenClaw
 
 ## Configuration
 

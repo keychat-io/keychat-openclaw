@@ -11,6 +11,7 @@ permissions:
 jobs:
   build:
     strategy:
+      max-parallel: 1
       matrix:
         include:
           - target: aarch64-apple-darwin

@@ -16,16 +16,16 @@ jobs:
         include:
           - target: aarch64-apple-darwin
             os: macos-15
-            artifact: keychat-signal-mls-bridge-darwin-arm64
+            artifact: keychat-openclaw-darwin-arm64
           - target: x86_64-apple-darwin
             os: macos-14
-            artifact: keychat-signal-mls-bridge-darwin-x64
+            artifact: keychat-openclaw-darwin-x64
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
-            artifact: keychat-signal-mls-bridge-linux-x64
+            artifact: keychat-openclaw-linux-x64
           - target: aarch64-unknown-linux-gnu
             os: ubuntu-latest
-            artifact: keychat-signal-mls-bridge-linux-arm64
+            artifact: keychat-openclaw-linux-arm64
 
     runs-on: ${{ matrix.os }}
 
@@ -62,7 +62,7 @@ jobs:
 
       - name: Package
         run: |
-          cp bridge/target/${{ matrix.target }}/release/keychat-signal-mls-bridge ${{ matrix.artifact }}
+          cp bridge/target/${{ matrix.target }}/release/keychat-openclaw ${{ matrix.artifact }}
           chmod +x ${{ matrix.artifact }}
 
       - name: Upload artifact

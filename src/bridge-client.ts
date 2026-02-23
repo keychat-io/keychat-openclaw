@@ -1,5 +1,5 @@
 /**
- * TypeScript client for the Keychat sidecar (keychat-signal-mls-bridge).
+ * TypeScript client for the Keychat sidecar (keychat-openclaw).
  * Communicates via JSON-RPC over stdin/stdout of a child process.
  */
 
@@ -100,7 +100,7 @@ export class KeychatBridgeClient {
         "bridge",
         "target",
         "release",
-        "keychat-signal-mls-bridge",
+        "keychat-openclaw",
       );
   }
 
@@ -112,7 +112,7 @@ export class KeychatBridgeClient {
 
     if (!existsSync(this.bridgePath)) {
       throw new Error(
-        `keychat-signal-mls-bridge binary not found at ${this.bridgePath}. Run 'cargo build --release' in the bridge directory.`,
+        `keychat-openclaw binary not found at ${this.bridgePath}. Run 'cargo build --release' in the bridge directory.`,
       );
     }
 
@@ -162,7 +162,7 @@ export class KeychatBridgeClient {
       // Bridge logs go to stderr — forward to OpenClaw logger
       const msg = data.toString().trim();
       if (msg) {
-        console.error(`[keychat-signal-mls-bridge] ${msg}`);
+        console.error(`[keychat-openclaw] ${msg}`);
       }
     });
 
@@ -178,7 +178,7 @@ export class KeychatBridgeClient {
       // Auto-restart on unexpected exit
       if (this.autoRestart && code !== 0) {
         const delay = Math.min(this.restartDelayMs * Math.pow(2, this.restartAttempts), 30000);
-        console.error(`[keychat-signal-mls-bridge] Unexpected exit (code=${code}), restarting in ${delay}ms (attempt ${this.restartAttempts + 1}/${this.maxRestartAttempts})`);
+        console.error(`[keychat-openclaw] Unexpected exit (code=${code}), restarting in ${delay}ms (attempt ${this.restartAttempts + 1}/${this.maxRestartAttempts})`);
         setTimeout(() => this.restart(), delay);
       }
     });
@@ -208,7 +208,7 @@ export class KeychatBridgeClient {
   /** Restart the bridge after an unexpected crash. */
   private async restart(): Promise<void> {
     if (this.restartAttempts >= this.maxRestartAttempts) {
-      console.error(`[keychat-signal-mls-bridge] Max restart attempts (${this.maxRestartAttempts}) reached, giving up`);
+      console.error(`[keychat-openclaw] Max restart attempts (${this.maxRestartAttempts}) reached, giving up`);
       return;
     }
     this.restartAttempts++;
@@ -225,13 +225,13 @@ export class KeychatBridgeClient {
         try {
           await this.onRestartComplete();
         } catch (err) {
-          console.error(`[keychat-signal-mls-bridge] Post-restart hook failed: ${err}`);
+          console.error(`[keychat-openclaw] Post-restart hook failed: ${err}`);
         }
       }
       this.restartAttempts = 0;
-      console.error(`[keychat-signal-mls-bridge] Restart successful (sessions restored)`);
+      console.error(`[keychat-openclaw] Restart successful (sessions restored)`);
     } catch (err) {
-      console.error(`[keychat-signal-mls-bridge] Restart failed: ${err}`);
+      console.error(`[keychat-openclaw] Restart failed: ${err}`);
     }
   }
 
@@ -252,7 +252,7 @@ export class KeychatBridgeClient {
         );
         await Promise.race([pingPromise, timeoutPromise]);
       } catch {
-        console.error(`[keychat-signal-mls-bridge] Health check failed — killing stale process`);
+        console.error(`[keychat-openclaw] Health check failed — killing stale process`);
         try { this.process?.kill(); } catch { /* ignore */ }
         // Auto-restart will trigger from the exit handler
       }

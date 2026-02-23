@@ -58,7 +58,7 @@ If you installed via **Option B**:
 curl -fsSL https://raw.githubusercontent.com/keychat-io/keychat-openclaw/main/scripts/install.sh | bash
 ```
 
-### Connect
+### Add Your Agent as a Keychat Contact
 
 1. After `openclaw gateway restart`, the agent will send you its **Keychat ID**, **contact link**, and **QR code** in your active chat (Telegram, webchat, etc.):
    ```

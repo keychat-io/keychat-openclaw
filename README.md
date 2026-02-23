@@ -158,7 +158,7 @@ Generate an NWC connection string from your wallet app (Keychat, Alby Hub, Mutin
 1. After gateway restart, the agent sends its **npub**, **contact link**, and **QR code** to the owner's active chat
 2. Owner shares the link with the contact, or the contact adds the npub directly in the Keychat app
 3. Keychat app sends a **friend request** (Gift Wrap, kind:1059)
-4. Agent processes the hello, establishes a Signal Protocol session, and replies
+4. Agent immediately establishes a Signal Protocol session and replies
 5. If `dmPolicy` is `pairing`, the owner must approve via `openclaw pair approve keychat <pubkey>`; if `open`, the agent accepts immediately
 6. Full bidirectional E2E encrypted chat is established
 

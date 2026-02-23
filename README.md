@@ -153,15 +153,6 @@ Generate an NWC connection string from your wallet app (Keychat, Alby Hub, Mutin
 - **Encryption**: Signal Protocol (Double Ratchet) for E2E encryption
 - **Transport**: Nostr relays (kind:4 DMs + kind:1059 Gift Wrap for friend requests)
 
-## How Pairing Works
-
-Under the hood, when a contact adds your agent:
-
-1. Keychat app sends a **friend request** (Gift Wrap, kind:1059)
-2. Agent immediately establishes a Signal Protocol session and replies
-3. If `dmPolicy` is `pairing`, the owner must approve via `openclaw pair approve keychat <pubkey>`; if `open`, the agent accepts immediately
-4. Full bidirectional E2E encrypted chat is established
-
 ## Security
 
 - **E2E Encryption**: All messages encrypted with Signal Protocol — relay operators cannot read content

@@ -160,9 +160,14 @@ export class KeychatBridgeClient {
     });
 
     this.process.stderr?.on("data", (data: Buffer) => {
-      // Bridge logs go to stderr — forward to OpenClaw logger
+      // Bridge logs go to stderr — route to appropriate log level
       const msg = data.toString().trim();
-      if (msg) {
+      if (!msg) return;
+      if (msg.includes(" INFO ")) {
+        console.log(`[keychat] ${msg}`);
+      } else if (msg.includes(" WARN ")) {
+        console.warn(`[keychat] ${msg}`);
+      } else {
         console.error(`[keychat] ${msg}`);
       }
     });

@@ -35,7 +35,7 @@ During installation, OpenClaw's security scanner may show three warnings. All ar
 | Shell command execution (keychain.ts)      | Stores identity mnemonics in the OS keychain (macOS Keychain / Linux libsecret).     |
 | Shell command execution (notify.ts)        | Notifies the agent on startup so it can send the Keychat ID and QR code to the user. |
 
-Source code is fully open: [github.com/keychat-io/keychat](https://github.com/keychat-io/keychat)
+Source code is fully open: [github.com/keychat-io/keychat-openclaw](https://github.com/keychat-io/keychat-openclaw)
 
 ### Upgrade
 

@@ -4,17 +4,17 @@
 set -e
 
 REPO="keychat-io/keychat-openclaw"
-INSTALL_DIR="${OPENCLAW_EXTENSIONS:-$HOME/.openclaw/extensions}/keychat"
+INSTALL_DIR="${OPENCLAW_EXTENSIONS:-$HOME/.openclaw/extensions}/keychat-openclaw"
 BINARY="$INSTALL_DIR/bridge/target/release/keychat-openclaw"
 
 echo "🔑 Installing Keychat"
 echo ""
 
-# ── Clean up conflicting installs ──
-NPM_DIR="${OPENCLAW_EXTENSIONS:-$HOME/.openclaw/extensions}/keychat-openclaw"
-if [ -d "$NPM_DIR" ] && [ "$INSTALL_DIR" != "$NPM_DIR" ]; then
-  echo "🧹 Removing npm-installed copy ($NPM_DIR)..."
-  rm -rf "$NPM_DIR"
+# ── Clean up old directory name ──
+OLD_DIR="${OPENCLAW_EXTENSIONS:-$HOME/.openclaw/extensions}/keychat"
+if [ -d "$OLD_DIR" ] && [ "$INSTALL_DIR" != "$OLD_DIR" ]; then
+  echo "🧹 Migrating from old directory ($OLD_DIR)..."
+  rm -rf "$OLD_DIR"
 fi
 
 # ── Check OpenClaw ──

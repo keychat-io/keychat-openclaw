@@ -6,3 +6,6 @@ package-lock.json
 bridge_err.log
 *.log
 .DS_Store
+
+.env
+.npmrc.tmp

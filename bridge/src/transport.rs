@@ -723,6 +723,31 @@ impl NostrTransport {
         self.resubscribe_ratchet_addrs_since(None).await
     }
 
+    /// Check relay connectivity and resubscribe if needed.
+    pub async fn check_relay_health(&self) -> Result<bool> {
+        let relays = self.pool.relays().await;
+        let mut disconnected = Vec::new();
+        for (url, relay) in &relays {
+            let status = relay.status();
+            if status != RelayStatus::Connected {
+                disconnected.push(url.clone());
+                log::warn!("Relay {} is {:?}, will reconnect", url, status);
+            }
+        }
+        if !disconnected.is_empty() {
+            log::info!("Reconnecting {} disconnected relay(s)...", disconnected.len());
+            self.pool.connect().await;
+            // Give relays a moment to establish connections
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            // Resubscribe to ensure we receive events
+            self.resubscribe_ratchet_addrs().await?;
+            log::info!("Relay health check: reconnected and resubscribed");
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
+
     /// Disconnect from all relays.
     pub async fn disconnect(self) -> Result<()> {
         self.pool.disconnect().await;

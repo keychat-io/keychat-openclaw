@@ -55,6 +55,12 @@ const MAX_PENDING_QUEUE = 100;
 const MAX_MESSAGE_RETRIES = 5;
 
 // ═══════════════════════════════════════════════════════════════════════════
+// Per-account startup mutex — prevents concurrent startAccount from corrupting state
+// during rapid hot-reloads (e.g. two config changes <1s apart)
+// ═══════════════════════════════════════════════════════════════════════════
+const accountStartupLocks = new Map<string, Promise<void>>();
+
+// ═══════════════════════════════════════════════════════════════════════════
 // Pending hello messages — queued while waiting for session establishment
 // ═══════════════════════════════════════════════════════════════════════════
 
@@ -691,6 +697,18 @@ export const keychatPlugin: ChannelPlugin<ResolvedKeychatAccount> = {
       const runtime = getKeychatRuntime();
       const account = ctx.account;
 
+      // Serialize startAccount calls for the same account — wait for any in-flight
+      // startup/cleanup to finish before proceeding (prevents hot-reload race conditions)
+      const prevLock = accountStartupLocks.get(account.accountId);
+      if (prevLock) {
+        ctx.log?.info(`[${account.accountId}] Waiting for previous startup to finish...`);
+        await prevLock.catch(() => {}); // ignore errors from previous run
+      }
+
+      let lockResolve: () => void;
+      const lock = new Promise<void>((resolve) => { lockResolve = resolve; });
+      accountStartupLocks.set(account.accountId, lock);
+
       ctx.log?.info(`[${account.accountId}] Starting Keychat channel...`);
 
       // Clean up any existing bridge from a previous start
@@ -1139,6 +1157,10 @@ export const keychatPlugin: ChannelPlugin<ResolvedKeychatAccount> = {
         bridgeReadyPromises.delete(account.accountId);
       }
 
+      // Release startup lock — initialization is complete, bridge is ready
+      lockResolve!();
+      ctx.log?.info(`[${account.accountId}] Startup lock released — channel fully initialized`);
+
       // Keep the channel alive until abortSignal fires (OpenClaw expects startAccount
       // to stay pending while the channel is running — resolving triggers auto-restart)
       const abortSignal = (ctx as any).abortSignal as AbortSignal | undefined;
@@ -1152,15 +1174,29 @@ export const keychatPlugin: ChannelPlugin<ResolvedKeychatAccount> = {
         await new Promise<void>(() => {});
       }
 
-      // Cleanup on abort
+      // Cleanup on abort — clear ALL module-level state for this account
+      // to prevent stale data leaking into the next startAccount call
       bridge.disableAutoRestart();
       await bridge.disconnect();
       await bridge.stop();
+      // Clear peerSubscribedAddresses entries for this account's peers BEFORE deleting peer sessions
+      const peersToClean = peerSessionsByAccount.get(account.accountId);
+      if (peersToClean) {
+        for (const [peerPk] of peersToClean) {
+          peerSubscribedAddresses.delete(peerPk);
+        }
+      }
+      // Now clear all per-account state so next startup reads fresh from DB
       activeBridges.delete(account.accountId);
       accountInfoCache.delete(account.accountId);
       bridgeReadyPromises.delete(account.accountId);
       bridgeReadyResolvers.delete(account.accountId);
-      ctx.log?.info(`[${account.accountId}] Keychat provider stopped`);
+      accountStartupLocks.delete(account.accountId);
+      peerSessionsByAccount.delete(account.accountId);
+      addressToPeerByAccount.delete(account.accountId);
+      seenEventIdsByAccount.delete(account.accountId);
+      mlsInitialized.delete(account.accountId);
+      ctx.log?.info(`[${account.accountId}] Keychat provider stopped (all state cleared)`);
     },
   },
 };

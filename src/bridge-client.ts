@@ -252,6 +252,15 @@ export class KeychatBridgeClient {
           setTimeout(() => reject(new Error("health check timeout")), this.HEALTH_CHECK_TIMEOUT_MS),
         );
         await Promise.race([pingPromise, timeoutPromise]);
+        // Also check relay connectivity and auto-reconnect if needed
+        try {
+          const result = await this.call("relay_health_check") as { reconnected?: boolean };
+          if (result?.reconnected) {
+            console.log(`[keychat-openclaw] Relay health check: reconnected and resubscribed`);
+          }
+        } catch (relayErr) {
+          console.warn(`[keychat-openclaw] Relay health check failed: ${relayErr}`);
+        }
       } catch {
         console.error(`[keychat-openclaw] Health check failed — killing stale process`);
         try { this.process?.kill(); } catch { /* ignore */ }

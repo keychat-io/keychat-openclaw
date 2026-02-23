@@ -199,6 +199,7 @@ impl BridgeState {
             "mls_fetch_key_package" => self.handle_mls_fetch_key_package(req.params).await,
 
             "ping" => Ok(serde_json::json!({"pong": true})),
+            "relay_health_check" => self.handle_relay_health_check().await,
 
             _ => anyhow::bail!("Unknown method: {}", req.method),
         }
@@ -2108,6 +2109,16 @@ impl BridgeState {
 
         Ok(serde_json::json!({
             "event_json": event.as_json(),
+        }))
+    }
+
+    /// Check relay health and reconnect/resubscribe if any relay is disconnected.
+    async fn handle_relay_health_check(&self) -> Result<serde_json::Value> {
+        let transport = self.transport.as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Not connected"))?;
+        let reconnected = transport.check_relay_health().await?;
+        Ok(serde_json::json!({
+            "reconnected": reconnected,
         }))
     }
 }

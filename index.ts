@@ -85,7 +85,7 @@ function ensureConfig(): void {
 }
 
 const plugin = {
-  id: "keychat-openclaw",
+  id: "keychat",
   name: "Keychat",
   description:
     "Keychat channel plugin — sovereign identity + E2E encrypted chat. " +

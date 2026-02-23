@@ -10,22 +10,20 @@ Your agent becomes a full Keychat citizen: it can receive friend requests, estab
 
 ## Install
 
-### Option A: OpenClaw plugin (recommended)
-
 ```bash
 openclaw plugins install @keychat-io/keychat-openclaw
 openclaw gateway restart
 ```
 
+That's it. The plugin automatically downloads the bridge binary and initializes the config on first load.
+
 Supported platforms: macOS (ARM/x64), Linux (x64/ARM64).
 
-### Option B: Shell script (full install)
+Alternatively, install via shell script:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/keychat-io/keychat-openclaw/main/scripts/install.sh | bash
 ```
-
-This clones the repo, downloads the binary, registers the plugin, and restarts the gateway in one step.
 
 ### Security Warnings
 
@@ -33,96 +31,73 @@ During installation, OpenClaw's security scanner may show three warnings. All ar
 
 | Warning | Reason |
 |---------|--------|
-| Shell command execution (bridge-client.ts) | Keychat's Signal Protocol and MLS Protocol encryption are implemented in Rust. The plugin spawns a Rust sidecar process to bridge between Node.js and the native crypto layer. |
-| Shell command execution (keychain.ts) | Agent identity mnemonics are stored in the OS keychain (macOS Keychain / Linux libsecret) rather than plain files, which is the more secure option. |
-| Shell command execution (notify.ts) | After startup, the plugin notifies the agent so it can proactively send the Keychat ID and QR code to the user on their active channel (Telegram, webchat, etc). |
+| Shell command execution (bridge-client.ts) | Spawns a Rust sidecar for Signal Protocol and MLS encryption. |
+| Shell command execution (keychain.ts) | Stores identity mnemonics in the OS keychain (macOS Keychain / Linux libsecret). |
+| Shell command execution (notify.ts) | Notifies the agent on startup so it can send the Keychat ID and QR code to the user. |
 
 Source code is fully open: [github.com/keychat-io/keychat-openclaw](https://github.com/keychat-io/keychat-openclaw)
 
 ### Upgrade
 
-**Easiest way:** Just tell your agent "upgrade keychat" in any chat. The agent will handle it and reconnect automatically.
-
-Or manually:
-
-If you installed via **Option A**:
+Tell your agent "upgrade keychat" in any chat, or manually:
 
 ```bash
 openclaw plugins install @keychat-io/keychat-openclaw@latest
 openclaw gateway restart
 ```
 
-If you installed via **Option B**:
+## Add Your Agent as a Keychat Contact
 
-```bash
-curl -fsSL https://raw.githubusercontent.com/keychat-io/keychat-openclaw/main/scripts/install.sh | bash
+After `openclaw gateway restart`, the agent will send you its **Keychat ID**, **contact link**, and **QR code** in your active chat (Telegram, webchat, etc.):
+
+```
+🔑 Keychat ID: npub1...
+📱 Add contact: https://www.keychat.io/u/?k=npub1...
+🖼️ QR code image
 ```
 
-### Add Your Agent as a Keychat Contact
-
-1. After `openclaw gateway restart`, the agent will send you its **Keychat ID**, **contact link**, and **QR code** in your active chat (Telegram, webchat, etc.):
-   ```
-   🔑 Keychat ID: npub1...
-   📱 Add contact: https://www.keychat.io/u/?k=npub1...
-   🖼️ QR code image
-   ```
-2. Open the [Keychat app](https://keychat.io) → tap the link, paste the npub, or scan the QR code to add as contact
-3. If `dmPolicy` is `open`, the agent accepts immediately; if `pairing` (default), the owner must approve via OpenClaw
+Open the [Keychat app](https://keychat.io) → tap the link, paste the npub, or scan the QR code to add as contact. If `dmPolicy` is `open` (default after auto-init), the agent accepts immediately.
 
 ## Configuration
 
-All options go under `channels.keychat` in your OpenClaw config:
+All options go under `channels.keychat` in your OpenClaw config (`~/.openclaw/openclaw.json`):
 
 | Option             | Type     | Default                      | Description                                               |
 | ------------------ | -------- | ---------------------------- | --------------------------------------------------------- |
-| `enabled`          | boolean  | `false`                      | Enable/disable the Keychat channel                        |
+| `enabled`          | boolean  | `true`                       | Enable/disable the Keychat channel                        |
 | `name`             | string   | —                            | Display name for this account                             |
 | `relays`           | string[] | `["wss://relay.keychat.io"]` | Nostr relay WebSocket URLs                                |
-| `dmPolicy`         | enum     | `"pairing"`                  | Access policy: `pairing`, `allowlist`, `open`, `disabled` |
+| `dmPolicy`         | enum     | `"open"`                     | Access policy: `pairing`, `allowlist`, `open`, `disabled` |
 | `allowFrom`        | string[] | `[]`                         | Allowed sender pubkeys (npub or hex)                      |
-| `mnemonic`         | string   | —                            | Identity mnemonic (auto-generated, stored in keychain)    |
-| `publicKey`        | string   | —                            | Derived hex public key (read-only)                        |
-| `npub`             | string   | —                            | Derived bech32 npub (read-only)                           |
 | `lightningAddress` | string   | —                            | Lightning address for receiving payments                  |
 | `nwcUri`           | string   | —                            | Nostr Wallet Connect URI for wallet access                |
-| `markdown`         | object   | —                            | Markdown formatting overrides                             |
 
 ### DM Policies
 
-- **`pairing`** (default): New contacts require owner approval via OpenClaw's pairing system
+- **`open`**: Anyone can message the agent (default)
+- **`pairing`**: New contacts require owner approval via OpenClaw
 - **`allowlist`**: Only pubkeys in `allowFrom` can communicate
-- **`open`**: Anyone can message the agent
 - **`disabled`**: No inbound messages accepted
 
 ## Lightning Wallet
 
-Keychat supports Lightning payments:
-
 ### Lightning Address (receive-only)
 
-Configure a Lightning address so your agent can generate invoices:
-
 ```json
-{
-  "lightningAddress": "user@walletofsatoshi.com"
-}
+{ "lightningAddress": "user@walletofsatoshi.com" }
 ```
-
-The agent can create invoices via LNURL-pay protocol. Note: payment verification depends on the provider (some don't support verify URLs).
 
 ### Nostr Wallet Connect (NWC)
 
-For full wallet access (create invoices, check balance, verify payments), configure NWC:
+For full wallet access (create invoices, check balance, verify payments):
 
 ```json
-{
-  "nwcUri": "nostr+walletconnect://pubkey?relay=wss://...&secret=..."
-}
+{ "nwcUri": "nostr+walletconnect://pubkey?relay=wss://...&secret=..." }
 ```
 
 Generate an NWC connection string from your wallet app (Keychat, Alby Hub, Mutiny, Coinos, etc.).
 
-**Security note**: The agent can receive payments freely. Outbound payments require owner approval — the agent will forward the invoice to the owner instead of paying directly.
+**Security note**: The agent can receive payments freely. Outbound payments require owner approval.
 
 ## Architecture
 
@@ -137,62 +112,32 @@ Generate an NWC connection string from your wallet app (Keychat, Alby Hub, Mutin
                                   └────────────────────┘
 ```
 
-- **TypeScript plugin** (`src/channel.ts`): Integrates with OpenClaw's channel system, handles routing, pairing, and message dispatch
-- **Rust sidecar** (`bridge/`): Manages Signal Protocol sessions, Nostr transport, encryption/decryption
-- **Communication**: JSON-RPC over stdin/stdout of spawned child process
-- **Encryption**: Signal Protocol (Double Ratchet) for E2E encryption
+- **TypeScript plugin**: OpenClaw channel integration, routing, pairing, message dispatch
+- **Rust sidecar**: Signal Protocol sessions, Nostr transport, encryption/decryption
+- **Communication**: JSON-RPC over stdin/stdout
+- **Encryption**: Signal Protocol (Double Ratchet) with forward and backward secrecy
 - **Transport**: Nostr relays (kind:4 DMs + kind:1059 Gift Wrap for friend requests)
 
 ## Security
 
 - **E2E Encryption**: All messages encrypted with Signal Protocol — relay operators cannot read content
-- **Forward Secrecy**: Compromising current keys doesn't reveal past messages (Double Ratchet)
-- **Backward Secrecy**: New messages use fresh keys after each exchange
+- **Forward & Backward Secrecy**: Double Ratchet ensures compromising current keys reveals neither past nor future messages
 - **Sovereign Identity**: Agent generates its own keypair — no third-party identity provider
-- **Key Storage**: Mnemonic stored in system keychain (macOS Keychain, Linux secret service); falls back to config file
+- **Key Storage**: Mnemonic stored in system keychain (macOS Keychain, Linux secret service)
 - **Ephemeral Senders**: Each outbound message uses a fresh Nostr keypair, preventing metadata correlation
 - **Receiving Address Rotation**: Ratchet-derived addresses rotate per message, preventing traffic analysis
 
 ## Troubleshooting
 
-### Bridge not starting
-
-- Ensure the binary exists: `ls bridge/target/release/keychat-openclaw`
-- Rebuild: `cd bridge && cargo build --release`
-- Check logs for startup errors
-
-### Relay connection issues
-
-- Verify relay URLs are correct WebSocket endpoints (`wss://...`)
-- Test relay connectivity: `websocat wss://relay.keychat.io`
-- Try alternative relays
-
-### Session corruption
-
-- If messages fail to decrypt, the plugin will automatically warn the peer
-- The peer should re-add the agent as a contact to establish a new session
-- As a last resort, delete the Signal DB: `rm ~/.openclaw/keychat/signal-default.db` and restart
-
-### Messages not delivered
-
-- Check if the bridge is responsive: look for health check logs
-- The plugin queues failed messages (up to 100) and retries every 30s
-- Pending messages are also flushed after bridge restart
-
-### No QR code generated
-
-- Install the `qrcode` npm package: `npm install qrcode`
-- The contact URL in logs works without QR code
+- **Bridge not starting**: Check `ls ~/.openclaw/extensions/keychat-openclaw/bridge/target/release/keychat-openclaw`. If missing, restart gateway (auto-downloads) or build from source: `cd bridge && cargo build --release`
+- **Relay issues**: Verify relay URLs (`wss://...`), try alternative relays
+- **Decryption errors**: Peer should delete old contact and re-add the agent
+- **Messages not delivered**: Plugin queues failed messages (up to 100) and retries every 30s
 
 ## Development
 
-### Building
-
 ```bash
-# Build the Rust sidecar
 cd bridge && cargo build --release
-
-# Run tests
 cargo test
 ```
 
@@ -200,24 +145,23 @@ cargo test
 
 ```
 ├── src/
-│   ├── channel.ts        # Main channel plugin (OpenClaw integration)
-│   ├── bridge-client.ts  # TypeScript RPC client for the Rust sidecar
+│   ├── channel.ts        # Main channel plugin
+│   ├── bridge-client.ts  # RPC client for Rust sidecar
 │   ├── config-schema.ts  # Zod config schema
 │   ├── keychain.ts       # System keychain integration
-│   ├── lightning.ts      # Lightning address (LNURL-pay) support
-│   ├── nwc.ts            # Nostr Wallet Connect (NIP-47) client
+│   ├── lightning.ts      # LNURL-pay support
+│   ├── nwc.ts            # Nostr Wallet Connect (NIP-47)
 │   ├── media.ts          # Blossom media encryption/upload
 │   ├── qrcode.ts         # QR code generation
 │   ├── runtime.ts        # Plugin runtime accessor
 │   └── types.ts          # Account types and resolvers
-├── bridge/
-│   └── src/
-│       ├── main.rs       # Sidecar entry point (stdin/stdout loop)
-│       ├── rpc.rs        # JSON-RPC dispatch
-│       ├── signal.rs     # Signal Protocol manager
-│       ├── protocol.rs   # Keychat protocol types
-│       ├── mls.rs        # MLS large group support
-│       └── transport.rs  # Nostr relay transport
+├── bridge/src/
+│   ├── main.rs           # Sidecar entry point
+│   ├── rpc.rs            # JSON-RPC dispatch
+│   ├── signal.rs         # Signal Protocol manager
+│   ├── protocol.rs       # Keychat protocol types
+│   ├── mls.rs            # MLS large group support
+│   └── transport.rs      # Nostr relay transport
 ├── scripts/
 │   └── install.sh        # One-line installer
 ├── index.ts              # Plugin entry point

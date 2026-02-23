@@ -66,7 +66,7 @@ const accountStartupLocks = new Map<string, Promise<void>>();
 
 interface PendingHelloMessage {
   text: string;
-  resolve: (result: { channel: "keychat"; to: string; messageId: string }) => void;
+  resolve: (result: { channel: "keychat-openclaw"; to: string; messageId: string }) => void;
   reject: (err: Error) => void;
   timer: ReturnType<typeof setTimeout>;
 }
@@ -91,7 +91,7 @@ async function flushPendingHelloMessages(bridge: KeychatBridgeClient, accountId:
       const result = await bridge.sendMessage(peerPubkey, msg.text);
       await handleReceivingAddressRotation(bridge, accountId, result, peerPubkey);
       msg.resolve({
-        channel: "keychat" as const,
+        channel: "keychat-openclaw" as const,
         to: peerPubkey,
         messageId: result.event_id,
       });
@@ -248,7 +248,7 @@ function resolveDisplayName(cfg: any, accountId: string, channelName?: string, f
   if (channelName) return channelName;
   // Look up agent identity name via bindings
   const bindings = (cfg.bindings ?? []) as Array<{ agentId?: string; match?: { channel?: string; accountId?: string } }>;
-  const binding = bindings.find(b => b.match?.channel === "keychat" && b.match?.accountId === accountId);
+  const binding = bindings.find(b => b.match?.channel === "keychat-openclaw" && b.match?.accountId === accountId);
   const agentId = binding?.agentId ?? (accountId === DEFAULT_ACCOUNT_ID ? "main" : accountId);
   const agents = (cfg.agents?.list ?? []) as Array<{ id?: string; identity?: { name?: string }; name?: string }>;
   const agent = agents.find(a => a.id === agentId);
@@ -412,7 +412,7 @@ export const keychatPlugin: ChannelPlugin<ResolvedKeychatAccount> = {
         allowFrom: account.config.allowFrom ?? [],
         policyPath: `${prefix}.dmPolicy`,
         allowFromPath: `${prefix}.allowFrom`,
-        approveHint: formatPairingApproveHint("keychat"),
+        approveHint: formatPairingApproveHint("keychat-openclaw"),
         normalizeEntry: (raw) => normalizePubkey(raw),
       };
     },
@@ -438,7 +438,7 @@ export const keychatPlugin: ChannelPlugin<ResolvedKeychatAccount> = {
       const core = getKeychatRuntime();
       const tableMode = core.channel.text.resolveMarkdownTableMode({
         cfg: core.config.loadConfig(),
-        channel: "keychat",
+        channel: "keychat-openclaw",
         accountId: aid,
       });
       const message = core.channel.text.convertMarkdownTables(text ?? "", tableMode);
@@ -449,7 +449,7 @@ export const keychatPlugin: ChannelPlugin<ResolvedKeychatAccount> = {
         const result = await resetPeerSession(normalizedTo, aid, true);
         console.log(`[keychat] [${aid}] Reset session result for ${normalizedTo}:`, result);
         return {
-          channel: "keychat" as const,
+          channel: "keychat-openclaw" as const,
           to: normalizedTo,
           messageId: `reset-${Date.now()}`,
         };
@@ -486,7 +486,7 @@ export const keychatPlugin: ChannelPlugin<ResolvedKeychatAccount> = {
             // Queue for later delivery
             queueOutbound(normalizedTo, message, aid);
             return {
-              channel: "keychat" as const,
+              channel: "keychat-openclaw" as const,
               to: normalizedTo,
               messageId: `queued-${Date.now()}`,
             };
@@ -494,7 +494,7 @@ export const keychatPlugin: ChannelPlugin<ResolvedKeychatAccount> = {
         }
 
         // Queue the message and wait for session establishment
-        return new Promise<{ channel: "keychat"; to: string; messageId: string }>((resolve, reject) => {
+        return new Promise<{ channel: "keychat-openclaw"; to: string; messageId: string }>((resolve, reject) => {
           const timer = setTimeout(() => {
             // Timeout — remove from queue and reject
             const pending = pendingHelloMessages.get(normalizedTo);
@@ -509,7 +509,7 @@ export const keychatPlugin: ChannelPlugin<ResolvedKeychatAccount> = {
             // Fall back to queuing for retry
             queueOutbound(normalizedTo, message, aid);
             resolve({
-              channel: "keychat" as const,
+              channel: "keychat-openclaw" as const,
               to: normalizedTo,
               messageId: `queued-hello-timeout-${Date.now()}`,
             });
@@ -528,7 +528,7 @@ export const keychatPlugin: ChannelPlugin<ResolvedKeychatAccount> = {
         // Handle receiving address rotation
         await handleReceivingAddressRotation(bridge, aid, result, normalizedTo);
         return {
-          channel: "keychat" as const,
+          channel: "keychat-openclaw" as const,
           to: normalizedTo,
           messageId: result.event_id,
         };
@@ -537,7 +537,7 @@ export const keychatPlugin: ChannelPlugin<ResolvedKeychatAccount> = {
         queueOutbound(normalizedTo, message, aid);
         console.warn(`[keychat] sendText failed, queued for retry: ${err}`);
         return {
-          channel: "keychat" as const,
+          channel: "keychat-openclaw" as const,
           to: normalizedTo,
           messageId: `queued-${Date.now()}`,
         };
@@ -561,14 +561,14 @@ export const keychatPlugin: ChannelPlugin<ResolvedKeychatAccount> = {
         try {
           const result = await retrySend(() => bridge.mlsSendMessage(groupId, messageText));
           return {
-            channel: "keychat" as const,
+            channel: "keychat-openclaw" as const,
             to,
             messageId: result.event_id,
           };
         } catch (err) {
           console.warn(`[keychat] sendMedia to MLS group failed: ${err}`);
           return {
-            channel: "keychat" as const,
+            channel: "keychat-openclaw" as const,
             to,
             messageId: `failed-${Date.now()}`,
           };
@@ -581,7 +581,7 @@ export const keychatPlugin: ChannelPlugin<ResolvedKeychatAccount> = {
         const result = await retrySend(() => bridge.sendMessage(normalizedTo, messageText));
         await handleReceivingAddressRotation(bridge, aid, result, normalizedTo);
         return {
-          channel: "keychat" as const,
+          channel: "keychat-openclaw" as const,
           to: normalizedTo,
           messageId: result.event_id,
         };
@@ -589,7 +589,7 @@ export const keychatPlugin: ChannelPlugin<ResolvedKeychatAccount> = {
         queueOutbound(normalizedTo, messageText, aid);
         console.warn(`[keychat] sendMedia failed, queued for retry: ${err}`);
         return {
-          channel: "keychat" as const,
+          channel: "keychat-openclaw" as const,
           to: normalizedTo,
           messageId: `queued-${Date.now()}`,
         };
@@ -624,7 +624,7 @@ export const keychatPlugin: ChannelPlugin<ResolvedKeychatAccount> = {
       );
       if (!existsSync(bridgePath)) {
         issues.push({
-          channel: "keychat",
+          channel: "keychat-openclaw",
           accountId: accounts[0]?.accountId ?? DEFAULT_ACCOUNT_ID,
           kind: "runtime",
           message: "Bridge binary not found (will auto-download on start)",
@@ -635,7 +635,7 @@ export const keychatPlugin: ChannelPlugin<ResolvedKeychatAccount> = {
       const anyPeers = [...peerSessionsByAccount.values()].some((m) => m.size > 0);
       if (!anyPeers) {
         issues.push({
-          channel: "keychat",
+          channel: "keychat-openclaw",
           accountId: accounts[0]?.accountId ?? DEFAULT_ACCOUNT_ID,
           kind: "runtime",
           message: "No peers connected yet",
@@ -647,7 +647,7 @@ export const keychatPlugin: ChannelPlugin<ResolvedKeychatAccount> = {
         const dbPath = signalDbPath(account.accountId);
         if (!existsSync(dbPath)) {
           issues.push({
-            channel: "keychat",
+            channel: "keychat-openclaw",
             accountId: account.accountId,
             kind: "runtime",
             message: "Signal DB file missing",
@@ -658,7 +658,7 @@ export const keychatPlugin: ChannelPlugin<ResolvedKeychatAccount> = {
         const lastError = typeof account.lastError === "string" ? account.lastError.trim() : "";
         if (lastError) {
           issues.push({
-            channel: "keychat",
+            channel: "keychat-openclaw",
             accountId: account.accountId,
             kind: "runtime",
             message: `Channel error: ${lastError}`,
@@ -1652,7 +1652,7 @@ async function dispatchMlsGroupToAgent(
   ctx.log?.info(`[${accountId}] dispatchMlsGroupToAgent: resolving route for group=${groupId.slice(0, 12)}`);
   const route = core.channel.routing.resolveAgentRoute({
     cfg,
-    channel: "keychat",
+    channel: "keychat-openclaw",
     accountId,
     peer: {
       kind: "group",
@@ -1681,23 +1681,23 @@ async function dispatchMlsGroupToAgent(
     SenderId: senderPubkey,
     GroupId: groupId,
     GroupName: groupName,
-    Provider: "keychat" as const,
-    Surface: "keychat" as const,
+    Provider: "keychat-openclaw" as const,
+    Surface: "keychat-openclaw" as const,
     MessageSid: eventId,
-    OriginatingChannel: "keychat" as const,
+    OriginatingChannel: "keychat-openclaw" as const,
     OriginatingTo: `keychat:mls-group:${groupId}`,
     ...(mediaPath ? { MediaPath: mediaPath } : {}),
   });
 
   const tableMode = core.channel.text.resolveMarkdownTableMode({
     cfg,
-    channel: "keychat",
+    channel: "keychat-openclaw",
     accountId,
   });
   const { onModelSelected, ...prefixOptions } = createReplyPrefixOptions({
     cfg,
     agentId: route.agentId,
-    channel: "keychat",
+    channel: "keychat-openclaw",
     accountId,
   });
 
@@ -2214,7 +2214,7 @@ async function dispatchToAgent(
 
   const route = core.channel.routing.resolveAgentRoute({
     cfg,
-    channel: "keychat",
+    channel: "keychat-openclaw",
     accountId,
     peer: {
       kind: "direct",
@@ -2241,23 +2241,23 @@ async function dispatchToAgent(
     ChatType: "direct" as const,
     SenderName: senderLabel,
     SenderId: peerNostrPubkey,
-    Provider: "keychat" as const,
-    Surface: "keychat" as const,
+    Provider: "keychat-openclaw" as const,
+    Surface: "keychat-openclaw" as const,
     MessageSid: eventId,
-    OriginatingChannel: "keychat" as const,
+    OriginatingChannel: "keychat-openclaw" as const,
     OriginatingTo: `keychat:${accountId}`,
     ...(mediaPath ? { MediaPath: mediaPath } : {}),
   });
 
   const tableMode = core.channel.text.resolveMarkdownTableMode({
     cfg,
-    channel: "keychat",
+    channel: "keychat-openclaw",
     accountId,
   });
   const { onModelSelected, ...prefixOptions } = createReplyPrefixOptions({
     cfg,
     agentId: route.agentId,
-    channel: "keychat",
+    channel: "keychat-openclaw",
     accountId,
   });
 
@@ -2331,7 +2331,7 @@ async function dispatchGroupToAgent(
   // Use group-specific session key
   const route = core.channel.routing.resolveAgentRoute({
     cfg,
-    channel: "keychat",
+    channel: "keychat-openclaw",
     accountId,
     peer: {
       kind: "group",
@@ -2368,23 +2368,23 @@ async function dispatchGroupToAgent(
     SenderId: peerNostrPubkey,
     GroupId: groupId,
     GroupName: groupName,
-    Provider: "keychat" as const,
-    Surface: "keychat" as const,
+    Provider: "keychat-openclaw" as const,
+    Surface: "keychat-openclaw" as const,
     MessageSid: eventId,
-    OriginatingChannel: "keychat" as const,
+    OriginatingChannel: "keychat-openclaw" as const,
     OriginatingTo: `keychat:group:${groupId}`,
     ...(mediaPath ? { MediaPath: mediaPath } : {}),
   });
 
   const tableMode = core.channel.text.resolveMarkdownTableMode({
     cfg,
-    channel: "keychat",
+    channel: "keychat-openclaw",
     accountId,
   });
   const { onModelSelected, ...prefixOptions } = createReplyPrefixOptions({
     cfg,
     agentId: route.agentId,
-    channel: "keychat",
+    channel: "keychat-openclaw",
     accountId,
   });
 

@@ -96,7 +96,7 @@ openclaw plugins install "$INSTALL_DIR" 2>&1 || true
 # ── Auto-configure ──
 CONFIG_FILE="$HOME/.openclaw/openclaw.json"
 if [ -f "$CONFIG_FILE" ]; then
-  if grep -q '"keychat"' "$CONFIG_FILE" 2>/dev/null; then
+  if grep -q '"keychat-openclaw"' "$CONFIG_FILE" 2>/dev/null; then
     echo "ℹ️  Keychat already in config"
   else
     # Insert keychat into channels object
@@ -108,13 +108,13 @@ try:
         cfg = json.load(f)
     if 'channels' not in cfg:
         cfg['channels'] = {}
-    cfg['channels']['keychat'] = {'enabled': True}
+    cfg['channels']['keychat-openclaw'] = {'enabled': True}
     with open('$CONFIG_FILE', 'w') as f:
         json.dump(cfg, f, indent=2, ensure_ascii=False)
     print('✅ Keychat enabled in config')
 except Exception as e:
     print(f'⚠️  Could not auto-configure: {e}')
-    print('   Add manually: \"keychat\": {{\"enabled\": true}} under channels')
+    print('   Add manually: \"keychat-openclaw\": {{\"enabled\": true}} under channels')
 "
     elif command -v node &>/dev/null; then
       node -e "
@@ -122,17 +122,17 @@ const fs = require('fs');
 try {
   const cfg = JSON.parse(fs.readFileSync('$CONFIG_FILE', 'utf8'));
   if (!cfg.channels) cfg.channels = {};
-  cfg.channels.keychat = { enabled: true };
+  cfg.channels['keychat-openclaw'] = { enabled: true };
   fs.writeFileSync('$CONFIG_FILE', JSON.stringify(cfg, null, 2));
   console.log('✅ Keychat enabled in config');
 } catch(e) {
   console.log('⚠️  Could not auto-configure:', e.message);
-  console.log('   Add manually: \"keychat\": {\"enabled\": true} under channels');
+  console.log('   Add manually: \"keychat-openclaw\": {\"enabled\": true} under channels');
 }
 "
     else
       echo "⚠️  Add to $CONFIG_FILE under \"channels\":"
-      echo '     "keychat": { "enabled": true }'
+      echo '     "keychat-openclaw": { "enabled": true }'
     fi
   fi
 else

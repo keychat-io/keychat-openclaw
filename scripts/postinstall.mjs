@@ -137,5 +137,5 @@ console.log("Next step: restart the gateway to activate Keychat");
 console.log("");
 console.log("  openclaw gateway restart");
 console.log("");
-console.log("Your agent's Keychat ID will appear in the logs.");
-console.log("Run 'openclaw status' to see it.");
+console.log("Your agent's Keychat ID will appear in the gateway logs.");
+console.log("Run 'openclaw logs --follow' to see it.");

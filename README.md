@@ -58,6 +58,16 @@ After `openclaw gateway restart`, the agent will send you its **Keychat ID**, **
 
 Open the [Keychat app](https://keychat.io) → tap the link, paste the npub, or scan the QR code to add as contact. If `dmPolicy` is `open` (default after auto-init), the agent accepts immediately.
 
+**Can't find the public key?** Check your config file or gateway logs:
+
+```bash
+# View the agent's npub in config
+cat ~/.openclaw/openclaw.json | grep npub
+
+# Or watch the gateway logs for the Keychat ID
+openclaw logs --follow
+```
+
 ## Configuration
 
 All options go under `channels.keychat` in your OpenClaw config (`~/.openclaw/openclaw.json`):

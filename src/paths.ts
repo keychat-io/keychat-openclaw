@@ -19,7 +19,7 @@ export const WORKSPACE_KEYCHAT_DIR = join(HOME, ".openclaw", "workspace", "keych
 
 /** Signal DB path for a given account */
 export function signalDbPath(accountId: string): string {
-  return join(KEYCHAT_DIR, `signal-${accountId}.db`);
+  return join(HOME, ".openclaw", `keychat-signal-${accountId}.db`);
 }
 
 /** QR code image path for a given account */

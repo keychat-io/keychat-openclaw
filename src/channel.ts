@@ -714,7 +714,7 @@ export const keychatPlugin: ChannelPlugin<ResolvedKeychatAccount> = {
       ctx.log?.info(`[${account.accountId}] Bridge sidecar started`);
 
       // 2. Initialize Signal Protocol DB
-      const dbPath = `~/.openclaw/keychat/signal-${account.accountId}.db`;
+      const dbPath = `~/.openclaw/keychat-signal-${account.accountId}.db`;
       await bridge.init(dbPath);
       ctx.log?.info(`[${account.accountId}] Signal DB initialized`);
 
@@ -826,11 +826,19 @@ export const keychatPlugin: ChannelPlugin<ResolvedKeychatAccount> = {
         `═══════════════════════════════════════════════════\n`,
       );
 
-      // Log agent readiness (visible in gateway logs)
-      ctx.log?.info?.(
-        `[${account.accountId}] Agent "${displayName}" is online. ` +
-        `Use keychat_identity tool to get contact link and QR code.`,
-      );
+      // Notify agent so it can relay the link to the owner on any active channel
+      try {
+        const { sendSystemEvent } = await import("./notify.js");
+        await sendSystemEvent(
+          `[Keychat Plugin] Agent "${displayName}" (account: ${account.accountId}) is online and ready.\n` +
+          `Use the keychat_identity tool to get the agent's Keychat ID, contact link, and QR code.\n` +
+          `Then send the contact info to the user on their active channel using the message tool.\n` +
+          `The user can open the link or scan the QR code in Keychat app to add this agent as a contact.`,
+        );
+      } catch {
+        // Best-effort: if openclaw CLI not available or event fails, just log
+        ctx.log?.warn?.(`[${account.accountId}] Failed to send system event notification`);
+      }
 
       ctx.setStatus({
         accountId: account.accountId,
@@ -845,8 +853,10 @@ export const keychatPlugin: ChannelPlugin<ResolvedKeychatAccount> = {
       activeBridges.set(account.accountId, bridge);
 
       // 7. Restore peer sessions and receiving addresses from DB
+      console.log(`[keychat] [${account.accountId}] Step 7: restoring peer sessions...`);
       try {
         const { mappings } = await bridge.getPeerMappings();
+        console.log(`[keychat] [${account.accountId}] Step 7: getPeerMappings returned ${mappings.length} mapping(s)`);
         if (mappings.length > 0) {
           ctx.log?.info(`[${account.accountId}] Restored ${mappings.length} peer mapping(s) from DB`);
           for (const m of mappings) {
@@ -876,7 +886,9 @@ export const keychatPlugin: ChannelPlugin<ResolvedKeychatAccount> = {
         }
 
         // Restore address-to-peer mappings from DB and populate peerSubscribedAddresses
+        console.log(`[keychat] [${account.accountId}] Step 7b: getting address mappings...`);
         const { mappings: addrMappings } = await bridge.getAddressMappings();
+        console.log(`[keychat] [${account.accountId}] Step 7b: getAddressMappings returned ${addrMappings.length} mapping(s)`);
         if (addrMappings.length > 0) {
           for (const am of addrMappings) {
             getAddressToPeer(account.accountId).set(am.address, am.peer_nostr_pubkey);
@@ -940,6 +952,7 @@ export const keychatPlugin: ChannelPlugin<ResolvedKeychatAccount> = {
         }
       } catch (err) {
         ctx.log?.error(`[${account.accountId}] Failed to restore sessions from DB: ${err}`);
+        console.error(`[keychat] [${account.accountId}] Failed to restore sessions from DB:`, err);
       }
 
       // 8. Restore groups from DB

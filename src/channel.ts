@@ -797,14 +797,19 @@ export const keychatPlugin: ChannelPlugin<ResolvedKeychatAccount> = {
       const contactUrl = `https://www.keychat.io/u/?k=${info.pubkey_npub}`;
       const qrPath = qrCodePath(account.accountId);
 
-      // Generate QR code (best-effort)
-      let qrSaved = false;
+      // Generate QR codes (best-effort)
+      let qrTerminal = "";
+      try {
+        const { generateQRTerminal } = await import("./qrcode.js");
+        qrTerminal = await generateQRTerminal(contactUrl);
+      } catch { /* qrcode not installed, skip */ }
+
+      // Also save PNG for sharing (best-effort)
       try {
         mkdirSync(WORKSPACE_KEYCHAT_DIR, { recursive: true });
         const QRCode = await import("qrcode");
         await QRCode.toFile(qrPath, contactUrl, { width: 256 });
-        qrSaved = true;
-      } catch { /* qrcode not installed, skip */ }
+      } catch { /* skip */ }
 
       const cfg = runtime.config.loadConfig();
       const displayName = resolveDisplayName(cfg, account.accountId, account.name);
@@ -817,7 +822,7 @@ export const keychatPlugin: ChannelPlugin<ResolvedKeychatAccount> = {
         `\n` +
         `  📱 Add contact (tap or scan):\n` +
         `  ${contactUrl}\n` +
-        (qrSaved ? `\n  🖼️  QR code: ${qrPath}\n` : ``) +
+        (qrTerminal ? `\n${qrTerminal}\n` : ``) +
         `═══════════════════════════════════════════════════\n`,
       );
 

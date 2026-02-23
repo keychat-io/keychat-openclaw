@@ -794,13 +794,13 @@ export const keychatPlugin: ChannelPlugin<ResolvedKeychatAccount> = {
 
       // 6. Log the agent's Keychat ID for the owner
       const contactUrl = `https://www.keychat.io/u/?k=${info.pubkey_npub}`;
-      const qrPath = join(process.env.HOME || "~", ".openclaw", "keychat", `qr-${account.accountId}.png`);
+      const qrPath = join(process.env.HOME || "~", ".openclaw", "workspace", "keychat", `qr-${account.accountId}.png`);
 
       // Generate QR code (best-effort)
       let qrSaved = false;
       try {
         const { mkdirSync } = await import("node:fs");
-        mkdirSync(join(process.env.HOME || "~", ".openclaw", "keychat"), { recursive: true });
+        mkdirSync(join(process.env.HOME || "~", ".openclaw", "workspace", "keychat"), { recursive: true });
         const QRCode = await import("qrcode");
         await QRCode.toFile(qrPath, contactUrl, { width: 256 });
         qrSaved = true;
@@ -2512,7 +2512,7 @@ export function getContactInfo(accountId: string = DEFAULT_ACCOUNT_ID): {
   return {
     npub: info.pubkey_npub,
     contactUrl: `https://www.keychat.io/u/?k=${info.pubkey_npub}`,
-    qrCodePath: join(process.env.HOME || "~", ".openclaw", "keychat", `qr-${accountId}.png`),
+    qrCodePath: join(process.env.HOME || "~", ".openclaw", "workspace", "keychat", `qr-${accountId}.png`),
   };
 }
 
@@ -2537,7 +2537,7 @@ export function getAllAgentContacts(): Array<{
       accountId,
       npub: info.pubkey_npub,
       contactUrl: `https://www.keychat.io/u/?k=${info.pubkey_npub}`,
-      qrCodePath: join(process.env.HOME || "~", ".openclaw", "keychat", `qr-${accountId}.png`),
+      qrCodePath: join(process.env.HOME || "~", ".openclaw", "workspace", "keychat", `qr-${accountId}.png`),
     });
   }
   return results;

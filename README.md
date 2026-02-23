@@ -13,7 +13,7 @@ Your agent becomes a full Keychat citizen: it can receive friend requests, estab
 ### Option A: OpenClaw plugin (recommended)
 
 ```bash
-openclaw plugins install @keychat-io/keychat
+openclaw plugins install @keychat-io/keychat-openclaw
 openclaw gateway restart
 ```
 
@@ -42,7 +42,7 @@ Source code is fully open: [github.com/keychat-io/keychat-openclaw](https://gith
 
 ```bash
 # npm plugin
-openclaw plugins install @keychat-io/keychat@latest
+openclaw plugins install @keychat-io/keychat-openclaw@latest
 openclaw gateway restart
 
 # shell script (re-run the same command)

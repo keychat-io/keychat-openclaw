@@ -11,7 +11,7 @@ Step-by-step instructions to get your OpenClaw agent communicating via Keychat.
 ## Step 1: Install the Plugin
 
 ```bash
-openclaw plugins install @keychat-io/keychat
+openclaw plugins install @keychat-io/keychat-openclaw
 ```
 
 This auto-downloads the pre-compiled Rust sidecar binary for your platform. No Rust toolchain needed.

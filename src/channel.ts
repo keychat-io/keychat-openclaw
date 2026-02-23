@@ -348,7 +348,7 @@ export const keychatPlugin: ChannelPlugin<ResolvedKeychatAccount> = {
     chatTypes: ["direct", "group"],
     media: true,
   },
-  reload: { configPrefixes: ["channels.keychat"] },
+  reload: { configPrefixes: ["channels.keychat-openclaw"] },
   configSchema: buildChannelConfigSchema(KeychatConfigSchema),
 
   config: {
@@ -401,12 +401,12 @@ export const keychatPlugin: ChannelPlugin<ResolvedKeychatAccount> = {
 
   security: {
     resolveDmPolicy: ({ cfg, account, accountId }) => {
-      const channelCfg = (cfg.channels as Record<string, unknown> | undefined)?.keychat as
+      const channelCfg = (cfg.channels as Record<string, unknown> | undefined)?.["keychat-openclaw"] as
         | { accounts?: Record<string, unknown> } | undefined;
       const isMultiAccount = channelCfg?.accounts && Object.keys(channelCfg.accounts).length > 0;
       const prefix = isMultiAccount
-        ? `channels.keychat.accounts.${accountId ?? DEFAULT_ACCOUNT_ID}`
-        : "channels.keychat";
+        ? `channels.keychat-openclaw.accounts.${accountId ?? DEFAULT_ACCOUNT_ID}`
+        : "channels.keychat-openclaw";
       return {
         policy: account.config.dmPolicy ?? "pairing",
         allowFrom: account.config.allowFrom ?? [],
@@ -762,7 +762,7 @@ export const keychatPlugin: ChannelPlugin<ResolvedKeychatAccount> = {
             // Remove mnemonic from config (keep only publicKey/npub)
             const cfg = runtime.config.loadConfig();
             const channels = (cfg.channels ?? {}) as Record<string, unknown>;
-            const keychatCfg = (channels.keychat ?? {}) as Record<string, unknown>;
+            const keychatCfg = (channels["keychat-openclaw"] ?? {}) as Record<string, unknown>;
             const { mnemonic: _removed, ...keychatCfgClean } = keychatCfg;
             await runtime.config.writeConfigFile({
               ...cfg,
@@ -784,7 +784,7 @@ export const keychatPlugin: ChannelPlugin<ResolvedKeychatAccount> = {
         // Persist keys to config (mnemonic only if keychain failed)
         const cfg = runtime.config.loadConfig();
         const channels = (cfg.channels ?? {}) as Record<string, unknown>;
-        const keychatCfg = (channels.keychat ?? {}) as Record<string, unknown>;
+        const keychatCfg = (channels["keychat-openclaw"] ?? {}) as Record<string, unknown>;
         await runtime.config.writeConfigFile({
           ...cfg,
           channels: {

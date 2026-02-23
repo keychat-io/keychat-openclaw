@@ -84,7 +84,7 @@ export function resolveKeychatAccount(opts: {
   accountId?: string | null;
 }): ResolvedKeychatAccount {
   const accountId = opts.accountId ?? DEFAULT_ACCOUNT_ID;
-  const channelCfg = (opts.cfg.channels as Record<string, unknown> | undefined)?.keychat as
+  const channelCfg = (opts.cfg.channels as Record<string, unknown> | undefined)?.["keychat-openclaw"] as
     | KeychatChannelConfig
     | undefined;
 

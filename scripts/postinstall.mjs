@@ -48,3 +48,26 @@ try {
   console.warn("[keychat] Build from source: cd bridge && cargo build --release");
   // Don't fail install — user can build manually
 }
+
+// Auto-initialize config if not set
+try {
+  const result = execSync("openclaw config get channels.keychat", {
+    stdio: "pipe",
+    encoding: "utf-8",
+  }).trim();
+  if (result && result !== "undefined" && result !== "null") {
+    console.log("[keychat] Config already exists, skipping init");
+  } else {
+    throw new Error("no config");
+  }
+} catch {
+  console.log("[keychat] Initializing default config...");
+  try {
+    execSync('openclaw config set channels.keychat.enabled true', { stdio: "pipe" });
+    console.log("[keychat] ✅ Config initialized (channels.keychat.enabled = true)");
+    console.log("[keychat] Restart gateway to activate: openclaw gateway restart");
+  } catch (e) {
+    console.warn(`[keychat] Could not auto-configure: ${e.message}`);
+    console.warn('[keychat] Run manually: openclaw config set channels.keychat.enabled true');
+  }
+}

@@ -41,21 +41,35 @@ const plugin = {
               ],
             };
           }
-          const result = contacts.map((c) => ({
-            accountId: c.accountId,
-            npub: c.npub,
-            contactUrl: c.contactUrl,
-            qrCodePath: c.qrCodePath,
-            qrExists: existsSync(c.qrCodePath),
-          }));
+          const { generateQRDataUrl } = await import("./src/qrcode.js");
+          const results = [];
+          const contentParts: Array<{ type: "text"; text: string } | { type: "image"; data: string; mimeType: string }> = [];
+
+          for (const c of contacts) {
+            const qrDataUrl = await generateQRDataUrl(c.npub);
+            results.push({
+              accountId: c.accountId,
+              npub: c.npub,
+              contactUrl: c.contactUrl,
+            });
+            contentParts.push({
+              type: "text" as const,
+              text: `Account: ${c.accountId}\nnpub: ${c.npub}\nContact: ${c.contactUrl}`,
+            });
+            if (qrDataUrl) {
+              // Extract base64 from data URL: "data:image/png;base64,..."
+              const base64 = qrDataUrl.replace(/^data:image\/png;base64,/, "");
+              contentParts.push({
+                type: "image" as const,
+                data: base64,
+                mimeType: "image/png",
+              });
+            }
+          }
+
           return {
             details: null,
-            content: [
-              {
-                type: "text" as const,
-                text: JSON.stringify(result, null, 2),
-              },
-            ],
+            content: contentParts,
           };
         },
       });

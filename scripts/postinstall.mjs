@@ -75,27 +75,19 @@ try {
 import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 
-const configPath = join(homedir(), ".openclaw", "config.yaml");
+const configPath = join(homedir(), ".openclaw", "openclaw.json");
 try {
-  let configText = "";
+  let config = {};
   if (existsSync(configPath)) {
-    configText = readFileSync(configPath, "utf-8");
+    config = JSON.parse(readFileSync(configPath, "utf-8"));
   }
 
-  if (configText.includes("keychat")) {
+  if (config.channels?.keychat) {
     console.log("[keychat] Config already contains keychat settings, skipping init");
   } else {
-    // Append minimal keychat config
-    const keychatConfig = `\nchannels:\n  keychat:\n    enabled: true\n    dmPolicy: open\n`;
-    if (!configText.includes("channels:")) {
-      // No channels block at all — append
-      writeFileSync(configPath, configText + keychatConfig, "utf-8");
-    } else {
-      // channels block exists — insert keychat under it
-      const insertion = `  keychat:\n    enabled: true\n    dmPolicy: open\n`;
-      configText = configText.replace(/(channels:\s*\n)/, `$1${insertion}`);
-      writeFileSync(configPath, configText, "utf-8");
-    }
+    if (!config.channels) config.channels = {};
+    config.channels.keychat = { enabled: true, dmPolicy: "open" };
+    writeFileSync(configPath, JSON.stringify(config, null, 2) + "\n", "utf-8");
     console.log("[keychat] ✅ Config initialized (channels.keychat.enabled = true)");
     console.log("[keychat] Restart gateway to activate: openclaw gateway restart");
   }

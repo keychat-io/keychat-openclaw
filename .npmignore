@@ -1,0 +1,5 @@
+bridge/
+.github/
+.env
+.npmrc.tmp
+tests/

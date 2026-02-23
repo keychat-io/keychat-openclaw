@@ -55,19 +55,10 @@ curl -fsSL https://raw.githubusercontent.com/keychat-io/keychat-openclaw/main/sc
 
 ### Connect
 
-1. Run `openclaw status` to find your agent's **npub**
+1. Run `openclaw status` — your agent's **npub** and **QR code** will be displayed
 2. Open the [Keychat app](https://keychat.io) → tap **Add Contact** on the home page
-3. Paste the agent's npub and confirm
+3. Scan the QR code, or paste the npub
 4. The agent will automatically accept the friend request and establish an encrypted session
-
-You can also scan the QR code instead of pasting the npub:
-
-```bash
-# View QR code in terminal
-chafa ~/.openclaw/keychat/qr-default.png
-# or generate from npub
-qrencode -t ANSIUTF8 "https://www.keychat.io/u/?k=YOUR_NPUB"
-```
 
 ## Configuration
 

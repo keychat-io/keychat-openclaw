@@ -31,10 +31,10 @@ WARNING: Plugin "keychat" contains dangerous code patterns:
 
 **Both are expected and required.** Here's why:
 
-| Warning | File | Why it's needed |
-|---------|------|----------------|
+| Warning                                 | File               | Why it's needed                                                                                                                           |
+| --------------------------------------- | ------------------ | ----------------------------------------------------------------------------------------------------------------------------------------- |
 | Shell command execution (child_process) | `bridge-client.ts` | Spawns the Rust sidecar process for Signal Protocol & MLS encryption. Keychat's cryptography runs in Rust and must be bridged to Node.js. |
-| Shell command execution (child_process) | `keychain.ts` | Stores the agent's identity mnemonic in the OS keychain (macOS Keychain / Linux libsecret) instead of plain-text files. |
+| Shell command execution (child_process) | `keychain.ts`      | Stores the agent's identity mnemonic in the OS keychain (macOS Keychain / Linux libsecret) instead of plain-text files.                   |
 
 These warnings cannot be removed without sacrificing core functionality or security. The plugin does **not** execute arbitrary commands — it only spawns the bundled bridge binary and accesses the system keychain.
 
@@ -61,7 +61,7 @@ Source code is fully open: [github.com/keychat-io/keychat-openclaw](https://gith
 Tell your agent "upgrade keychat" in any chat, or manually:
 
 ```bash
-openclaw plugins install @keychat-io/keychat@latest
+openclaw plugins update keychat
 openclaw gateway restart
 ```
 

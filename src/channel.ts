@@ -24,10 +24,20 @@ import {
  * so we silently drop it to keep messages clean.
  */
 function stripReasoningPrefix(text: string): string {
-  // Matches the exact format from formatReasoningMessage():
-  //   "Reasoning:\n_line1_\n_line2_\n\nActual answer..."
-  const re = /^Reasoning:\n(?:_[^\n]*_\n?)+\n*/;
-  return text.replace(re, "").trim();
+  // Strip reasoning in multiple formats:
+  // 1. "Reasoning:\n_line1_\n_line2_\n\nActual answer..."
+  // 2. Leading italic blocks: "_thinking text_\n_more thinking_\n\nActual answer..."
+  // 3. "**Heading**\n_thinking_\n\nActual answer..."
+  let result = text;
+
+  // Format 1: Explicit "Reasoning:" prefix
+  result = result.replace(/^Reasoning:\n(?:_[^\n]*_\n?)+\n*/s, "");
+
+  // Format 2: Leading italic lines (markdown _text_) at the start
+  // Keep stripping italic lines until we hit a non-italic line
+  result = result.replace(/^(?:_[^\n]*_\n*)+\n*/s, "");
+
+  return result.trim();
 }
 import { KeychatConfigSchema } from "./config-schema.js";
 import { getKeychatRuntime } from "./runtime.js";

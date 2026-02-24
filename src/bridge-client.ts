@@ -306,8 +306,13 @@ export class KeychatBridgeClient {
       this.pending.set(id, { resolve, reject });
 
       const request = JSON.stringify({ id, method, params: params ?? {} });
-      this.process.stdin.write(request + "\n");
-
+     try {
+        this.process.stdin.write(request + '\n');
+      } catch (error) {
+        this.pending.delete(id);
+        reject(new Error(`Bridge write failed: ${error}`));
+        return;
+      }
       // Timeout after 30 seconds
       setTimeout(() => {
         if (this.pending.has(id)) {

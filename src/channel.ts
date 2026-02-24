@@ -17,6 +17,18 @@ import {
   formatPairingApproveHint,
   type ChannelPlugin,
 } from "openclaw/plugin-sdk";
+
+/**
+ * Strip "Reasoning:\n_..._" prefix that OpenClaw core prepends when
+ * reasoning display is enabled.  Keychat has no collapsible UI for it,
+ * so we silently drop it to keep messages clean.
+ */
+function stripReasoningPrefix(text: string): string {
+  // Matches the exact format from formatReasoningMessage():
+  //   "Reasoning:\n_line1_\n_line2_\n\nActual answer..."
+  const re = /^Reasoning:\n(?:_[^\n]*_\n?)+\n*/;
+  return text.replace(re, "").trim();
+}
 import { KeychatConfigSchema } from "./config-schema.js";
 import { getKeychatRuntime } from "./runtime.js";
 import {
@@ -435,7 +447,7 @@ export const keychatPlugin: ChannelPlugin<ResolvedKeychatAccount> = {
         channel: "keychat",
         accountId: aid,
       });
-      const message = core.channel.text.convertMarkdownTables(text ?? "", tableMode);
+      const message = stripReasoningPrefix(core.channel.text.convertMarkdownTables(text ?? "", tableMode));
       const normalizedTo = normalizePubkey(to);
 
       // Handle /reset signal command — reset Signal session and re-send hello
@@ -1690,7 +1702,7 @@ async function dispatchMlsGroupToAgent(
       ...prefixOptions,
       deliver: async (payload: { text?: string }) => {
         if (!payload.text) return;
-        const message = core.channel.text.convertMarkdownTables(payload.text, tableMode);
+        const message = stripReasoningPrefix(core.channel.text.convertMarkdownTables(payload.text, tableMode));
         deliverBuffer.push(message);
         if (deliverTimer) clearTimeout(deliverTimer);
         deliverTimer = setTimeout(() => { flushDeliverBuffer(); }, DELIVER_DEBOUNCE_MS);
@@ -2255,7 +2267,7 @@ async function dispatchToAgent(
       ...prefixOptions,
       deliver: async (payload: { text?: string }) => {
         if (!payload.text) return;
-        const message = core.channel.text.convertMarkdownTables(payload.text, tableMode);
+        const message = stripReasoningPrefix(core.channel.text.convertMarkdownTables(payload.text, tableMode));
         deliverBuffer.push(message);
         // Reset debounce timer — wait for more chunks before sending
         if (deliverTimer) clearTimeout(deliverTimer);
@@ -2378,7 +2390,7 @@ async function dispatchGroupToAgent(
       ...prefixOptions,
       deliver: async (payload: { text?: string }) => {
         if (!payload.text) return;
-        const message = core.channel.text.convertMarkdownTables(payload.text, tableMode);
+        const message = stripReasoningPrefix(core.channel.text.convertMarkdownTables(payload.text, tableMode));
         deliverBuffer.push(message);
         if (deliverTimer) clearTimeout(deliverTimer);
         deliverTimer = setTimeout(() => { flushDeliverBuffer(); }, DELIVER_DEBOUNCE_MS);

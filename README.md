@@ -6,8 +6,6 @@ E2E encrypted AI agent communication via Keychat protocol.
 
 This plugin gives your OpenClaw agent a **sovereign identity** — a self-generated Public Key ID (Nostr keypair) — and enables **end-to-end encrypted communication** using the Signal Protocol over Nostr relays.
 
-Your agent becomes a full Keychat citizen: it can receive friend requests, establish Signal Protocol sessions, and exchange messages with Keychat app users. All messages are encrypted with forward and backward secrecy — not even relay operators can read them.
-
 ## Install
 
 ```bash
@@ -17,42 +15,22 @@ openclaw gateway restart
 
 That's it. The plugin automatically downloads the bridge binary and initializes the config on first load.
 
-Supported platforms: macOS (ARM/x64), Linux (x64/ARM64).
-
-### Security Warnings
-
-During installation, OpenClaw will show the following warning:
-
-```
-WARNING: Plugin "keychat" contains dangerous code patterns:
-  Shell command execution detected (child_process) (src/bridge-client.ts)
-  Shell command execution detected (child_process) (src/keychain.ts)
-```
-
-**Both are expected and required.** Here's why:
-
-| Warning                                 | File               | Why it's needed                                                                                                                           |
-| --------------------------------------- | ------------------ | ----------------------------------------------------------------------------------------------------------------------------------------- |
-| Shell command execution (child_process) | `bridge-client.ts` | Spawns the Rust sidecar process for Signal Protocol & MLS encryption. Keychat's cryptography runs in Rust and must be bridged to Node.js. |
-| Shell command execution (child_process) | `keychain.ts`      | Stores the agent's identity mnemonic in the OS keychain (macOS Keychain / Linux libsecret) instead of plain-text files.                   |
-
-These warnings cannot be removed without sacrificing core functionality or security. The plugin does **not** execute arbitrary commands — it only spawns the bundled bridge binary and accesses the system keychain.
-
 Alternatively, install via shell script:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/keychat-io/keychat-openclaw/main/scripts/install.sh | bash
 ```
 
+Supported platforms: macOS (ARM/x64), Linux (x64/ARM64).
+
 ### Security Warnings
 
-During installation, OpenClaw's security scanner may show three warnings. All are expected:
+During installation, OpenClaw's security scanner may show two warnings. Both are expected:
 
-| Warning                                    | Reason                                                                               |
-| ------------------------------------------ | ------------------------------------------------------------------------------------ |
-| Shell command execution (bridge-client.ts) | Spawns a Rust sidecar for Signal Protocol and MLS encryption.                        |
-| Shell command execution (keychain.ts)      | Stores identity mnemonics in the OS keychain (macOS Keychain / Linux libsecret).     |
-| Shell command execution (notify.ts)        | Notifies the agent on startup so it can send the Keychat ID and QR code to the user. |
+| Warning                                    | Reason                                                                           |
+| ------------------------------------------ | -------------------------------------------------------------------------------- |
+| Shell command execution (bridge-client.ts) | Spawns a Rust sidecar for Signal Protocol and MLS encryption.                    |
+| Shell command execution (keychain.ts)      | Stores identity mnemonics in the OS keychain (macOS Keychain / Linux libsecret). |
 
 Source code is fully open: [github.com/keychat-io/keychat-openclaw](https://github.com/keychat-io/keychat-openclaw)
 
@@ -77,15 +55,7 @@ After `openclaw gateway restart`, the agent will send you its **Keychat ID**, **
 
 Open the [Keychat app](https://keychat.io) → tap the link, paste the npub, or scan the QR code to add as contact. If `dmPolicy` is `open` (default after auto-init), the agent accepts immediately.
 
-**Can't find the public key?** Check your config file or gateway logs:
-
-```bash
-# View the agent's npub in config
-cat ~/.openclaw/openclaw.json | grep npub
-
-# Or watch the gateway logs for the Keychat ID
-openclaw logs --follow
-```
+**Can't find the public key?** Just ask your agent in chat: "What's your Keychat ID?"
 
 ## Configuration
 

@@ -47,6 +47,7 @@ import {
 } from "./bridge-client.js";
 import { storeMnemonic, retrieveMnemonic } from "./keychain.js";
 import { parseMediaUrl, downloadAndDecrypt, encryptAndUpload } from "./media.js";
+import { transcribe, type SttConfig } from "./stt.js";
 import { join } from "node:path";
 import { existsSync, mkdirSync } from "node:fs";
 import { signalDbPath, qrCodePath, WORKSPACE_KEYCHAT_DIR } from "./paths.js";
@@ -1449,7 +1450,19 @@ async function handleMlsGroupMessage(
           try {
             mlsMediaPath = await downloadAndDecrypt(mlsMediaInfo);
             ctx.log?.info(`[${accountId}] MLS group media downloaded: ${mlsMediaInfo.kctype} → ${mlsMediaPath}`);
-            mlsDisplayText = `[${mlsMediaInfo.kctype}: ${mlsMediaInfo.sourceName || mlsMediaInfo.suffix}] (saved to ${mlsMediaPath})`;
+            if (mlsMediaInfo.isVoiceNote) {
+              try {
+                const sttConfig: SttConfig = { provider: "whisper-cpp", language: "auto" };
+                const transcription = await transcribe(mlsMediaPath!, sttConfig);
+                ctx.log?.info(`[${accountId}] MLS voice note transcribed: ${transcription.slice(0, 80)}...`);
+                mlsDisplayText = `[voice message, ${mlsMediaInfo.duration || '?'}s] ${transcription}`;
+              } catch (sttErr) {
+                ctx.log?.error(`[${accountId}] MLS voice note STT failed: ${sttErr}`);
+                mlsDisplayText = `[voice message — transcription failed, audio saved to ${mlsMediaPath}]`;
+              }
+            } else {
+              mlsDisplayText = `[${mlsMediaInfo.kctype}: ${mlsMediaInfo.sourceName || mlsMediaInfo.suffix}] (saved to ${mlsMediaPath})`;
+            }
           } catch (err) {
             ctx.log?.error(`[${accountId}] MLS group media download failed: ${err}`);
             mlsDisplayText = `[${mlsMediaInfo.kctype} message — download failed]`;
@@ -2149,7 +2162,24 @@ async function handleEncryptedDM(
       const localPath = await downloadAndDecrypt(mediaInfo);
       mediaPath = localPath;
       ctx.log?.info(`[${accountId}] Downloaded ${mediaInfo.kctype}: ${localPath}`);
-      displayText = `[${mediaInfo.kctype}: ${mediaInfo.sourceName || mediaInfo.suffix}] (saved to ${localPath})`;
+      
+      // Voice note: transcribe to text via STT
+      if (mediaInfo.isVoiceNote) {
+        try {
+          const sttConfig: SttConfig = { 
+            provider: "whisper-cpp",
+            language: "auto",
+          };
+          const transcription = await transcribe(localPath, sttConfig);
+          ctx.log?.info(`[${accountId}] Voice note transcribed (${mediaInfo.duration || '?'}s): ${transcription.slice(0, 80)}...`);
+          displayText = `[voice message, ${mediaInfo.duration || '?'}s] ${transcription}`;
+        } catch (sttErr) {
+          ctx.log?.error(`[${accountId}] Voice note STT failed: ${sttErr}`);
+          displayText = `[voice message, ${mediaInfo.duration || '?'}s — transcription failed, audio saved to ${localPath}]`;
+        }
+      } else {
+        displayText = `[${mediaInfo.kctype}: ${mediaInfo.sourceName || mediaInfo.suffix}] (saved to ${localPath})`;
+      }
     } catch (err) {
       ctx.log?.error(`[${accountId}] Failed to download media: ${err}`);
       displayText = `[${mediaInfo.kctype} message — download failed]`;

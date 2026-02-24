@@ -12,6 +12,9 @@ export interface KeychatMediaInfo {
   size: number;
   hash?: string;
   sourceName?: string;
+  isVoiceNote?: boolean;
+  duration?: number;    // seconds
+  waveform?: string;    // base64 5-bit packed
 }
 
 export interface MediaUploadResult {
@@ -30,8 +33,11 @@ function resolveKctype(filePath: string, mimeType?: string): string {
   const imageExts = [".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp", ".tiff", ".svg"];
   const videoExts = [".mp4", ".avi", ".mov", ".mkv", ".webm", ".flv", ".wmv", ".m4v"];
 
+  const audioExts = [".ogg", ".opus", ".aac", ".m4a", ".mp3", ".wav"];
+
   if (mimeType?.startsWith("image/") || imageExts.includes(ext)) return "image";
   if (mimeType?.startsWith("video/") || videoExts.includes(ext)) return "video";
+  if (mimeType?.startsWith("audio/") || audioExts.includes(ext)) return "voiceNote";
   return "file";
 }
 
@@ -123,6 +129,7 @@ export async function encryptAndUpload(
   signEvent: (content: string, tags: string[][]) => Promise<string>,
   server?: string,
   mimeType?: string,
+  voiceNote?: { duration?: number; waveform?: string },
 ): Promise<MediaUploadResult> {
   const { encrypted, key, iv, hash, suffix, sourceName } = await encryptFile(filePath);
   const url = await uploadToBlossom(encrypted, hash, signEvent, server);
@@ -138,6 +145,12 @@ export async function encryptAndUpload(
   mediaUrl.searchParams.set("size", encrypted.length.toString());
   mediaUrl.searchParams.set("hash", hash);
   mediaUrl.searchParams.set("sourceName", sourceName);
+
+  if (voiceNote || kctype === "voiceNote") {
+    mediaUrl.searchParams.set("isVoiceNote", "1");
+    if (voiceNote?.duration) mediaUrl.searchParams.set("duration", voiceNote.duration.toString());
+    if (voiceNote?.waveform) mediaUrl.searchParams.set("waveform", voiceNote.waveform);
+  }
 
   return { mediaUrl: mediaUrl.toString(), kctype };
 }
@@ -166,6 +179,9 @@ export function parseMediaUrl(content: string): KeychatMediaInfo | null {
     size: parseInt(uri.searchParams.get("size") || "0", 10),
     hash: uri.searchParams.get("hash") || undefined,
     sourceName: uri.searchParams.get("sourceName") || undefined,
+    isVoiceNote: kctype === "voiceNote" || uri.searchParams.get("isVoiceNote") === "1",
+    duration: parseInt(uri.searchParams.get("duration") || "0", 10) || undefined,
+    waveform: uri.searchParams.get("waveform") || undefined,
   };
 }
 

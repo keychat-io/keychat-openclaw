@@ -306,7 +306,7 @@ const mlsInitialized = new Set<string>();
  * Normalize a pubkey: strip nostr: prefix, handle npub/hex.
  */
 function normalizePubkey(input: string): string {
-  const trimmed = input.replace(/^nostr:/i, "").trim();
+  const trimmed = input.replace(/^nostr:/i, "").replace(/^keychat:/i, "").trim();
   // If it's hex, lowercase it
   if (/^[0-9a-fA-F]{64}$/.test(trimmed)) {
     return trimmed.toLowerCase();
@@ -2261,7 +2261,7 @@ async function dispatchToAgent(
     Surface: "keychat" as const,
     MessageSid: eventId,
     OriginatingChannel: "keychat" as const,
-    OriginatingTo: `keychat:${accountId}`,
+    OriginatingTo: `keychat:${peerNostrPubkey}`,
     ...(mediaPath ? { MediaPath: mediaPath } : {}),
   });
 

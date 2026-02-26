@@ -405,7 +405,10 @@ function markProcessed(bridge: KeychatBridgeClient, accountId: string, eventId: 
 }
 // peerNostrPubkey → list of subscribed receiving addresses (most recent last, max MAX_RECEIVING_ADDRESSES per peer)
 const peerSubscribedAddresses = new Map<string, string[]>();
-const MAX_RECEIVING_ADDRESSES = 3;
+// No upper limit — keep all ratchet-derived receiving addresses (matches Keychat app behavior).
+// Old addresses naturally become unused but are never proactively deleted to avoid
+// losing addresses that the remote peer may still be sending to.
+const MAX_RECEIVING_ADDRESSES = Infinity;
 
 // ═══════════════════════════════════════════════════════════════════════════
 // MLS (Large Group) state
@@ -1096,46 +1099,37 @@ export const keychatPlugin: ChannelPlugin<ResolvedKeychatAccount> = {
           ctx.log?.info(`[${account.accountId}] Restored ${addrMappings.length} address-to-peer mapping(s) from DB`);
         }
 
-        // Sync: ensure each peer has up to MAX_RECEIVING_ADDRESSES from session alice_addrs
-        // This fills in missing addresses for peers that had sessions but incomplete mappings
-        const { addresses: allAliceAddrs } = await bridge.getReceivingAddresses();
-        if (allAliceAddrs.length > 0) {
-          // Build signal_pubkey → nostr_pubkey mapping from getPeerSessions
-          const signalToNostr = new Map<string, string>();
-          for (const [nostrPk, info] of getPeerSessions(account.accountId).entries()) {
-            signalToNostr.set(info.signalPubkey, nostrPk);
-          }
-
-          // Group alice_addrs by peer (via session_address → signal_pubkey → nostr_pubkey)
-          const aliceByPeer = new Map<string, string[]>();
-          for (const a of allAliceAddrs) {
-            const peerNostr = signalToNostr.get(a.session_address);
-            if (!peerNostr) continue;
-            let list = aliceByPeer.get(peerNostr);
-            if (!list) { list = []; aliceByPeer.set(peerNostr, list); }
-            list.push(a.nostr_pubkey);
-          }
-
-          // For each peer, take latest MAX_RECEIVING_ADDRESSES and save any missing ones
-          for (const [peerNostr, aliceAddrs] of aliceByPeer) {
-            const latest = aliceAddrs.slice(-MAX_RECEIVING_ADDRESSES);
-            const existing = peerSubscribedAddresses.get(peerNostr) ?? [];
-            const existingSet = new Set(existing);
-            for (const addr of latest) {
-              if (!existingSet.has(addr)) {
-                getAddressToPeer(account.accountId).set(addr, peerNostr);
-                existing.push(addr);
-                try { await bridge.saveAddressMapping(addr, peerNostr); } catch { /* */ }
-              }
+        // Sync: add any alice_addrs from Signal sessions that are missing from DB.
+        // Only adds — never deletes. Matches Keychat app behavior: keep all addresses,
+        // let old ones naturally become unused.
+        try {
+          const { addresses: allAliceAddrs } = await bridge.getReceivingAddresses();
+          if (allAliceAddrs.length > 0) {
+            const signalToNostr = new Map<string, string>();
+            for (const [nostrPk, info] of getPeerSessions(account.accountId).entries()) {
+              signalToNostr.set(info.signalPubkey, nostrPk);
             }
-            // Trim to MAX if over
-            while (existing.length > MAX_RECEIVING_ADDRESSES) {
-              const old = existing.shift()!;
-              getAddressToPeer(account.accountId).delete(old);
-              try { await bridge.deleteAddressMapping(old); } catch { /* */ }
+
+            let addedCount = 0;
+            for (const a of allAliceAddrs) {
+              const peerNostr = signalToNostr.get(a.session_address);
+              if (!peerNostr) continue;
+              if (getAddressToPeer(account.accountId).has(a.nostr_pubkey)) continue;
+              // New address — add to memory and DB
+              getAddressToPeer(account.accountId).set(a.nostr_pubkey, peerNostr);
+              const peerList = peerSubscribedAddresses.get(peerNostr) ?? [];
+              peerList.push(a.nostr_pubkey);
+              peerSubscribedAddresses.set(peerNostr, peerList);
+              try { await bridge.saveAddressMapping(a.nostr_pubkey, peerNostr); } catch { /* */ }
+              addedCount++;
             }
-            peerSubscribedAddresses.set(peerNostr, existing);
+            if (addedCount > 0) {
+              ctx.log?.info(`[${account.accountId}] Synced ${addedCount} new address(es) from Signal sessions`);
+            }
           }
+        } catch (err) {
+          // getReceivingAddresses failed (bridge not ready?) — skip sync, keep DB addresses intact
+          ctx.log?.warn(`[${account.accountId}] Skipped alice_addrs sync (bridge not ready?): ${err}`);
         }
 
         // Subscribe to all receiving addresses
@@ -2055,15 +2049,8 @@ async function handleEncryptedDM(
                   peerAddrs.push(a);
                   try { await bridge.saveAddressMapping(a, senderNostrId!); } catch { /* */ }
                 }
-                // Trim to MAX_RECEIVING_ADDRESSES
-                while (peerAddrs.length > MAX_RECEIVING_ADDRESSES) {
-                  const old = peerAddrs.shift()!;
-                  getAddressToPeer(accountId).delete(old);
-                  try { await bridge.removeSubscription([old]); } catch { /* */ }
-                  try { await bridge.deleteAddressMapping(old); } catch { /* */ }
-                }
                 peerSubscribedAddresses.set(senderNostrId!, peerAddrs);
-                ctx.log?.info(`[${accountId}] Registered ${newAddrs.length} receiving address(es) for new peer ${senderNostrId!.slice(0,16)} (kept ${peerAddrs.length})`);
+                ctx.log?.info(`[${accountId}] Registered ${newAddrs.length} receiving address(es) for new peer ${senderNostrId!.slice(0,16)} (total ${peerAddrs.length})`);
               }
             }
           } catch { /* best effort */ }
@@ -2143,7 +2130,10 @@ async function handleEncryptedDM(
       getAddressToPeer(accountId).set(msg.to_address, peerNostrPubkey);
       try {
         await bridge.saveAddressMapping(msg.to_address, peerNostrPubkey);
-      } catch { /* best effort */ }
+        console.log(`[keychat] inbound: saved to_address ${msg.to_address.slice(0,16)} → ${peerNostrPubkey.slice(0,16)} to DB`);
+      } catch (err) {
+        console.error(`[keychat] inbound: saveAddressMapping FAILED for ${msg.to_address.slice(0,16)} → ${peerNostrPubkey.slice(0,16)}: ${err}`);
+      }
     }
   }
 
@@ -2209,15 +2199,9 @@ async function handleEncryptedDM(
           peerAddrs.push(a);
           try { await bridge.saveAddressMapping(a, peerNostrPubkey); } catch { /* */ }
         }
-        while (peerAddrs.length > MAX_RECEIVING_ADDRESSES) {
-          const old = peerAddrs.shift()!;
-          getAddressToPeer(accountId).delete(old);
-          try { await bridge.removeSubscription([old]); } catch { /* */ }
-          try { await bridge.deleteAddressMapping(old); } catch { /* */ }
-        }
         peerSubscribedAddresses.set(peerNostrPubkey, peerAddrs);
         ctx.log?.info(
-          `[${accountId}] Updated ${newAddrs.length} receiving address(es) after decrypt (peer: ${peerNostrPubkey.slice(0,16)}, kept ${peerAddrs.length})`,
+          `[${accountId}] Updated ${newAddrs.length} receiving address(es) after decrypt (peer: ${peerNostrPubkey.slice(0,16)}, total ${peerAddrs.length})`,
         );
       }
     }
@@ -2666,33 +2650,20 @@ async function handleReceivingAddressRotation(
     getAddressToPeer(accountId).set(address, peerKey);
     try {
       await bridge.saveAddressMapping(address, peerKey);
-    } catch {
-      // Best effort persistence
+      console.log(`[keychat] handleReceivingAddressRotation: saved ${address.slice(0,16)} → ${peerKey.slice(0,16)} to DB`);
+    } catch (err) {
+      console.error(`[keychat] handleReceivingAddressRotation: saveAddressMapping FAILED for ${address.slice(0,16)} → ${peerKey.slice(0,16)}: ${err}`);
     }
+  } else {
+    console.warn(`[keychat] handleReceivingAddressRotation: peerKey is falsy, skipping DB save for ${address.slice(0,16)}`);
   }
 
   const peerAddrKey = peerKey || accountId;
   const addrs = peerSubscribedAddresses.get(peerAddrKey) ?? [];
   addrs.push(address);
-
-  // Keep only the latest MAX_RECEIVING_ADDRESSES addresses per peer
-  const staleAddrs: string[] = [];
-  while (addrs.length > MAX_RECEIVING_ADDRESSES) {
-    const old = addrs.shift()!;
-    getAddressToPeer(accountId).delete(old);
-    staleAddrs.push(old);
-  }
   peerSubscribedAddresses.set(peerAddrKey, addrs);
 
-  // Remove stale addresses from relay subscription and DB
-  if (staleAddrs.length > 0) {
-    try { await bridge.removeSubscription(staleAddrs); } catch { /* best effort */ }
-    for (const old of staleAddrs) {
-      try { await bridge.deleteAddressMapping(old); } catch { /* best effort */ }
-    }
-  }
-
-  // Add new address to relay subscription
+  // Add new address to relay subscription (never remove old ones)
   await bridge.addSubscription([address]);
 }
 

@@ -15,8 +15,6 @@ import {
   createReplyPrefixOptions,
   DEFAULT_ACCOUNT_ID,
   formatPairingApproveHint,
-  resolveDmGroupAccessWithLists,
-  isNormalizedSenderAllowed,
   type ChannelPlugin,
 } from "openclaw/plugin-sdk";
 
@@ -83,6 +81,7 @@ function readKeychatAllowFromStore(): string[] {
 
 /**
  * Resolve DM access decision for an inbound message.
+ * Self-contained — does NOT depend on SDK functions (which fail in ESM plugin context).
  * Returns "allow" | "block" | "pairing".
  */
 function resolveDmAccess(
@@ -93,25 +92,35 @@ function resolveDmAccess(
   const cfg = runtime.config.loadConfig();
   const account = resolveKeychatAccount({ cfg, accountId });
   const dmPolicy = account.config.dmPolicy ?? "pairing";
-  const configAllowFrom = (account.config.allowFrom ?? []).map((e) => String(e));
-  const storeAllowFrom = readKeychatAllowFromStore();
+
+  // "open" allows everyone
+  if (dmPolicy === "open") return { decision: "allow" };
+
+  // "disabled" blocks everyone
+  if (dmPolicy === "disabled") return { decision: "block" };
+
   const senderNormalized = normalizePubkey(senderNostrPubkey);
 
-  const result = resolveDmGroupAccessWithLists({
-    isGroup: false,
-    dmPolicy,
-    groupPolicy: "open",
-    allowFrom: configAllowFrom,
-    groupAllowFrom: [],
-    storeAllowFrom,
-    isSenderAllowed: (allowEntries: string[]) =>
-      isNormalizedSenderAllowed({
-        senderId: senderNormalized,
-        allowFrom: allowEntries.map((e) => normalizePubkey(e)),
-      }),
-  });
+  // Collect all allowed entries: config + store (pairing approvals)
+  const configEntries = (account.config.allowFrom ?? []).map((e) => normalizePubkey(String(e)));
+  const storeEntries = readKeychatAllowFromStore().map((e) => normalizePubkey(e));
+  const allAllowed = [...configEntries, ...storeEntries];
 
-  return { decision: result.decision as "allow" | "block" | "pairing" };
+  // Check wildcard
+  if (allAllowed.includes("*")) return { decision: "allow" };
+
+  // Check if sender is in any allowlist
+  const isAllowed = allAllowed.includes(senderNormalized);
+
+  if (dmPolicy === "allowlist") {
+    return isAllowed ? { decision: "allow" } : { decision: "block" };
+  }
+
+  if (dmPolicy === "pairing") {
+    return isAllowed ? { decision: "allow" } : { decision: "pairing" };
+  }
+
+  return { decision: "block" };
 }
 
 /** Generate a random 6-char alphanumeric pairing code. */

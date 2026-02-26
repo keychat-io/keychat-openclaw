@@ -1526,6 +1526,10 @@ async function handleNip04Message(
 
   // Dispatch as regular DM from the sender
   const senderPubkey = msg.from_pubkey;
+  if (!isSenderAllowedByDmPolicy(accountId, senderPubkey, runtime)) {
+    ctx.log?.info(`[${accountId}] ⛔ Blocked NIP-04 message from ${senderPubkey} — not authorized by dmPolicy`);
+    return;
+  }
   const peer = getPeerSessions(accountId).get(senderPubkey);
   const senderLabel = peer?.name || senderPubkey.slice(0, 12);
   await dispatchToAgent(bridge, accountId, senderPubkey, senderLabel, displayText, msg.event_id, runtime, ctx);
@@ -2047,6 +2051,11 @@ async function handleEncryptedDM(
             }
           } catch { /* not JSON — dispatch as regular message */ }
 
+          // DM Policy gate: block unauthorized senders
+          if (!isSenderAllowedByDmPolicy(accountId, senderNostrId, runtime)) {
+            ctx.log?.info(`[${accountId}] ⛔ Blocked PreKey message from ${senderNostrId} — not authorized by dmPolicy`);
+            return;
+          }
           // Dispatch non-hello PreKey messages to agent
           await dispatchToAgent(bridge, accountId, senderNostrId, senderName, displayText, msg.event_id, runtime, ctx);
           return;
@@ -2325,6 +2334,11 @@ async function handleEncryptedDM(
     ctx.log?.info(`[${accountId}] Detected group message: groupId=${groupContext.groupId}, subtype=${groupContext.groupMessage.subtype}, sender=${peerNostrPubkey}`);
     await dispatchGroupToAgent(bridge, accountId, groupContext.groupId, peerNostrPubkey, senderLabel, displayText, msg.event_id, runtime, ctx, groupContext.groupMessage, mediaPath);
   } else {
+    // DM Policy gate: block unauthorized senders
+    if (!isSenderAllowedByDmPolicy(accountId, peerNostrPubkey, runtime)) {
+      ctx.log?.info(`[${accountId}] ⛔ Blocked DM from ${peerNostrPubkey} — not authorized by dmPolicy`);
+      return;
+    }
     ctx.log?.info(`[${accountId}] Routing as 1:1 DM (no group context detected)`);
     await dispatchToAgent(bridge, accountId, peerNostrPubkey, senderLabel, displayText, msg.event_id, runtime, ctx, mediaPath);
   }
@@ -2342,12 +2356,6 @@ async function dispatchToAgent(
   ctx: { log?: { info: (m: string) => void; error: (m: string) => void; warn?: (m: string) => void }; setStatus: (s: Record<string, unknown> | any) => void },
   mediaPath?: string,
 ): Promise<void> {
-  // ── DM Policy gate: block unauthorized senders before dispatch ──
-  if (!isSenderAllowedByDmPolicy(accountId, peerNostrPubkey, runtime)) {
-    ctx.log?.info(`[${accountId}] ⛔ Blocked message from ${peerNostrPubkey} — not authorized by dmPolicy`);
-    return;
-  }
-
   const core = runtime;
   const cfg = core.config.loadConfig();
 

@@ -15,6 +15,8 @@ import {
   createReplyPrefixOptions,
   DEFAULT_ACCOUNT_ID,
   formatPairingApproveHint,
+  resolveDmGroupAccessWithLists,
+  isNormalizedSenderAllowed,
   type ChannelPlugin,
 } from "openclaw/plugin-sdk";
 
@@ -59,60 +61,120 @@ import { storeMnemonic, retrieveMnemonic } from "./keychain.js";
 import { parseMediaUrl, downloadAndDecrypt, encryptAndUpload } from "./media.js";
 import { transcribe, type SttConfig } from "./stt.js";
 import { join } from "node:path";
-import { existsSync, mkdirSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { signalDbPath, qrCodePath, WORKSPACE_KEYCHAT_DIR } from "./paths.js";
 
 // ═══════════════════════════════════════════════════════════════════════════
 // DM Policy enforcement — gate inbound messages before dispatch to agent
+// Uses OpenClaw's resolveDmGroupAccessWithLists for consistent behavior
+// with built-in channels (Signal, Telegram, Discord, etc.)
 // ═══════════════════════════════════════════════════════════════════════════
 
+/** Read the allow-from store for a channel (credentials/<channel>-allowFrom.json). */
+function readKeychatAllowFromStore(): string[] {
+  try {
+    const storePath = join(homedir(), ".openclaw", "credentials", "keychat-allowFrom.json");
+    if (!existsSync(storePath)) return [];
+    const store = JSON.parse(readFileSync(storePath, "utf-8"));
+    return (store.allowFrom ?? []).map((e: string) => String(e).trim()).filter(Boolean);
+  } catch { return []; }
+}
+
 /**
- * Check if a sender is allowed to chat based on dmPolicy + allowFrom config + pairing store.
- * Returns true if allowed, false if blocked.
+ * Resolve DM access decision for an inbound message.
+ * Returns "allow" | "block" | "pairing".
  */
-function isSenderAllowedByDmPolicy(
+function resolveDmAccess(
   accountId: string,
   senderNostrPubkey: string,
   runtime: ReturnType<typeof getKeychatRuntime>,
-): boolean {
+): { decision: "allow" | "block" | "pairing" } {
   const cfg = runtime.config.loadConfig();
   const account = resolveKeychatAccount({ cfg, accountId });
-  const policy = account.config.dmPolicy ?? "pairing";
-  
-  // "open" allows everyone
-  if (policy === "open") return true;
-  
-  // "disabled" blocks everyone
-  if (policy === "disabled") return false;
-
-  // Normalize sender pubkey for comparison
+  const dmPolicy = account.config.dmPolicy ?? "pairing";
+  const configAllowFrom = (account.config.allowFrom ?? []).map((e) => String(e));
+  const storeAllowFrom = readKeychatAllowFromStore();
   const senderNormalized = normalizePubkey(senderNostrPubkey);
 
-  // Collect allowFrom from config
-  const configAllowFrom = (account.config.allowFrom ?? []).map((e) => normalizePubkey(String(e)));
-  
-  // Read pairing store (credentials/keychat-allowFrom.json) — approved via /approve command
-  let storeAllowFrom: string[] = [];
+  const result = resolveDmGroupAccessWithLists({
+    isGroup: false,
+    dmPolicy,
+    groupPolicy: "open",
+    allowFrom: configAllowFrom,
+    groupAllowFrom: [],
+    storeAllowFrom,
+    isSenderAllowed: (allowEntries: string[]) =>
+      isNormalizedSenderAllowed({
+        senderId: senderNormalized,
+        allowFrom: allowEntries.map((e) => normalizePubkey(e)),
+      }),
+  });
+
+  return { decision: result.decision as "allow" | "block" | "pairing" };
+}
+
+/** Generate a random 6-char alphanumeric pairing code. */
+function generatePairingCode(): string {
+  const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"; // no I/O/0/1 to avoid confusion
+  let code = "";
+  const { randomBytes } = require("node:crypto");
+  const bytes = randomBytes(6);
+  for (const b of bytes) code += chars[b % chars.length];
+  return code;
+}
+
+/** Upsert a pairing request for a Keychat sender. Returns { code, created }. */
+function upsertKeychatPairingRequest(senderId: string, meta?: Record<string, string>): { code: string; created: boolean } {
+  const pairingPath = join(homedir(), ".openclaw", "credentials", "keychat-pairing.json");
   try {
-    const storePath = join(homedir(), ".openclaw", "credentials", "keychat-allowFrom.json");
-    if (existsSync(storePath)) {
-      const store = JSON.parse(readFileSync(storePath, "utf-8"));
-      storeAllowFrom = (store.allowFrom ?? []).map((e: string) => normalizePubkey(String(e)));
+    let data: { version: number; requests: Array<{ id: string; code: string; createdAt: string; lastSeenAt: string; meta?: Record<string, string> }> } = { version: 1, requests: [] };
+    if (existsSync(pairingPath)) {
+      data = JSON.parse(readFileSync(pairingPath, "utf-8"));
     }
-  } catch { /* ignore read errors */ }
 
-  // For "allowlist" mode: only config allowFrom is checked (not pairing store)
-  if (policy === "allowlist") {
-    return configAllowFrom.includes(senderNormalized) || storeAllowFrom.includes(senderNormalized);
+    const now = new Date().toISOString();
+    const normalizedId = normalizePubkey(senderId);
+    const existing = data.requests.find((r) => normalizePubkey(r.id) === normalizedId);
+
+    if (existing) {
+      existing.lastSeenAt = now;
+      if (meta) existing.meta = { ...existing.meta, ...meta };
+      writeFileSync(pairingPath, JSON.stringify(data, null, 2) + "\n", "utf-8");
+      return { code: existing.code, created: false };
+    }
+
+    // Generate unique code
+    const existingCodes = new Set(data.requests.map((r) => r.code));
+    let code = generatePairingCode();
+    while (existingCodes.has(code)) code = generatePairingCode();
+
+    data.requests.push({ id: normalizedId, code, createdAt: now, lastSeenAt: now, meta });
+
+    // Cap at 50 pending requests
+    if (data.requests.length > 50) {
+      data.requests = data.requests.slice(-50);
+    }
+
+    writeFileSync(pairingPath, JSON.stringify(data, null, 2) + "\n", "utf-8");
+    return { code, created: true };
+  } catch {
+    return { code: "", created: false };
   }
+}
 
-  // For "pairing" mode: check config allowFrom + pairing store
-  if (policy === "pairing") {
-    return configAllowFrom.includes(senderNormalized) || storeAllowFrom.includes(senderNormalized);
-  }
-
-  return false;
+/** Build the pairing reply message text. */
+function buildKeychatPairingReply(code: string, senderId: string): string {
+  return [
+    "OpenClaw: access not configured.",
+    "",
+    `keychatPubkey: ${senderId}`,
+    "",
+    `Pairing code: ${code}`,
+    "",
+    "Ask the bot owner to approve with:",
+    `  openclaw pairing approve keychat ${code}`,
+  ].join("\n");
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -1343,44 +1405,18 @@ async function handleFriendRequestInner(
     ctx.log?.info(`[${accountId}] Re-processing friend request from ${msg.from_pubkey} (existing session will be replaced)`);
   }
 
-  // Check DM policy before processing — reject unauthorized friend requests
+  // Check DM policy before processing — unified check via resolveDmAccess
   const core = runtime;
   const cfg = core.config.loadConfig();
   const account = resolveKeychatAccount({ cfg, accountId });
   const displayName = resolveDisplayName(cfg, accountId, account.name);
-  const policy = account.config.dmPolicy ?? "pairing";
-  const allowFrom = (account.config.allowFrom ?? []).map((e) => normalizePubkey(String(e)));
 
-  if (policy === "disabled") {
-    ctx.log?.info(`[${accountId}] Rejecting friend request — dmPolicy is disabled`);
+  const helloAccess = resolveDmAccess(accountId, msg.from_pubkey, runtime);
+  if (helloAccess.decision === "block") {
+    ctx.log?.info(`[${accountId}] Rejecting friend request from ${msg.from_pubkey} — dmPolicy block`);
     return;
   }
-
-  const senderNormalized = normalizePubkey(msg.from_pubkey);
-
-  if (policy === "allowlist" && !allowFrom.includes(senderNormalized)) {
-    ctx.log?.info(`[${accountId}] Rejecting friend request from ${msg.from_pubkey} — not in allowlist`);
-    return;
-  }
-
-  if (policy === "pairing" && !allowFrom.includes(senderNormalized)) {
-    // Check pairing store as well (approved via /approve)
-    let storeApproved = false;
-    try {
-      const storePath = join(homedir(), ".openclaw", "credentials", "keychat-allowFrom.json");
-      if (existsSync(storePath)) {
-        const store = JSON.parse(readFileSync(storePath, "utf-8"));
-        const storeEntries = (store.allowFrom ?? []).map((e: string) => normalizePubkey(String(e)));
-        storeApproved = storeEntries.includes(senderNormalized);
-      }
-    } catch { /* ignore */ }
-
-    if (!storeApproved) {
-      ctx.log?.info(`[${accountId}] Friend request from ${msg.from_pubkey} — pending pairing approval`);
-      // Continue processing to establish session (needed to send pending message)
-      // but mark as pending so we gate subsequent messages
-    }
-  }
+  const isPairingPending = helloAccess.decision === "pairing";
 
   // Process hello via bridge — establishes Signal session
   const hello = await bridge.processHello(msg.encrypted_content);
@@ -1419,10 +1455,16 @@ async function handleFriendRequestInner(
   // NOTE: peer mapping already persisted by Rust handle_process_hello (with local Signal keys).
   // Do NOT call savePeerMapping here — it would overwrite local_signal_pubkey/privkey with NULL.
 
-  // Auto-reply with hello (type 102 = DM_ADD_CONTACT_FROM_BOB)
-  const isPendingApproval = policy === "pairing" && !allowFrom.includes(senderNormalized);
-  const greetingText = isPendingApproval
-    ? "👋 Hi! I received your request. It's pending approval — the owner will review it shortly."
+  // Auto-reply with hello
+  let pairingGreeting = "";
+  if (isPairingPending) {
+    const { code } = upsertKeychatPairingRequest(msg.from_pubkey, { name: hello.peer_name });
+    pairingGreeting = code
+      ? `\n\nPairing code: ${code}\nAsk the bot owner to approve with:\n  openclaw pairing approve keychat ${code}`
+      : "";
+  }
+  const greetingText = isPairingPending
+    ? `👋 Hi! I received your request. It's pending approval — the owner will review it shortly.${pairingGreeting}`
     : `👋 Hi! I'm ${displayName}. We're connected now — feel free to chat!`;
   // Wrap as KeychatMessage so the receiver can identify this as a hello reply (type 102)
   const helloReplyMsg = JSON.stringify({
@@ -1526,8 +1568,14 @@ async function handleNip04Message(
 
   // Dispatch as regular DM from the sender
   const senderPubkey = msg.from_pubkey;
-  if (!isSenderAllowedByDmPolicy(accountId, senderPubkey, runtime)) {
-    ctx.log?.info(`[${accountId}] ⛔ Blocked NIP-04 message from ${senderPubkey} — not authorized by dmPolicy`);
+  const nip04Access = resolveDmAccess(accountId, senderPubkey, runtime);
+  if (nip04Access.decision === "block") {
+    ctx.log?.info(`[${accountId}] ⛔ Blocked NIP-04 message from ${senderPubkey} — dmPolicy`);
+    return;
+  }
+  if (nip04Access.decision === "pairing") {
+    ctx.log?.info(`[${accountId}] ⛔ NIP-04 message from ${senderPubkey} — pending pairing`);
+    // Can't easily send pairing reply via NIP-04 without bridge session, just block
     return;
   }
   const peer = getPeerSessions(accountId).get(senderPubkey);
@@ -2051,9 +2099,20 @@ async function handleEncryptedDM(
             }
           } catch { /* not JSON — dispatch as regular message */ }
 
-          // DM Policy gate: block unauthorized senders
-          if (!isSenderAllowedByDmPolicy(accountId, senderNostrId, runtime)) {
-            ctx.log?.info(`[${accountId}] ⛔ Blocked PreKey message from ${senderNostrId} — not authorized by dmPolicy`);
+          // DM Policy gate
+          const prekeyAccess = resolveDmAccess(accountId, senderNostrId, runtime);
+          if (prekeyAccess.decision === "block") {
+            ctx.log?.info(`[${accountId}] ⛔ Blocked PreKey message from ${senderNostrId} — dmPolicy`);
+            return;
+          }
+          if (prekeyAccess.decision === "pairing") {
+            ctx.log?.info(`[${accountId}] ⛔ PreKey message from ${senderNostrId} — pending pairing`);
+            const { code, created } = upsertKeychatPairingRequest(senderNostrId, { name: senderName });
+            if (created && code) {
+              try {
+                await retrySend(() => bridge.sendMessage(senderNostrId, buildKeychatPairingReply(code, senderNostrId)));
+              } catch { /* best effort */ }
+            }
             return;
           }
           // Dispatch non-hello PreKey messages to agent
@@ -2334,9 +2393,20 @@ async function handleEncryptedDM(
     ctx.log?.info(`[${accountId}] Detected group message: groupId=${groupContext.groupId}, subtype=${groupContext.groupMessage.subtype}, sender=${peerNostrPubkey}`);
     await dispatchGroupToAgent(bridge, accountId, groupContext.groupId, peerNostrPubkey, senderLabel, displayText, msg.event_id, runtime, ctx, groupContext.groupMessage, mediaPath);
   } else {
-    // DM Policy gate: block unauthorized senders
-    if (!isSenderAllowedByDmPolicy(accountId, peerNostrPubkey, runtime)) {
-      ctx.log?.info(`[${accountId}] ⛔ Blocked DM from ${peerNostrPubkey} — not authorized by dmPolicy`);
+    // DM Policy gate
+    const dmAccess = resolveDmAccess(accountId, peerNostrPubkey, runtime);
+    if (dmAccess.decision === "block") {
+      ctx.log?.info(`[${accountId}] ⛔ Blocked DM from ${peerNostrPubkey} — dmPolicy`);
+      return;
+    }
+    if (dmAccess.decision === "pairing") {
+      ctx.log?.info(`[${accountId}] ⛔ DM from ${peerNostrPubkey} — pending pairing`);
+      const { code, created } = upsertKeychatPairingRequest(peerNostrPubkey, { name: peer_.name });
+      if (created && code) {
+        try {
+          await retrySend(() => bridge.sendMessage(peerNostrPubkey, buildKeychatPairingReply(code, peerNostrPubkey)));
+        } catch { /* best effort */ }
+      }
       return;
     }
     ctx.log?.info(`[${accountId}] Routing as 1:1 DM (no group context detected)`);

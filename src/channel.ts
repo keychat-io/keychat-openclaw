@@ -461,6 +461,48 @@ export const keychatPlugin: ChannelPlugin<ResolvedKeychatAccount> = {
       const message = stripReasoningPrefix(core.channel.text.convertMarkdownTables(text ?? "", tableMode));
       const normalizedTo = normalizePubkey(to);
 
+      // Handle small group (Signal group) — route through sendGroupMessage (fan-out to each member)
+      const smallGroupMatch = normalizedTo.match(/^group:(.+)$/);
+      if (smallGroupMatch) {
+        const groupId = smallGroupMatch[1];
+        try {
+          const result = await retrySend(() => bridge.sendGroupMessage(groupId, message));
+          return {
+            channel: "keychat" as const,
+            to: normalizedTo,
+            messageId: result.event_ids?.[0] || `group-${Date.now()}`,
+          };
+        } catch (err) {
+          console.warn(`[keychat] [${aid}] sendText to small group ${groupId} failed: ${err}`);
+          return {
+            channel: "keychat" as const,
+            to: normalizedTo,
+            messageId: `error-${Date.now()}`,
+          };
+        }
+      }
+
+      // Handle MLS group — route through mlsSendMessage
+      const mlsGroupMatchText = normalizedTo.match(/^mls-group:(.+)$/);
+      if (mlsGroupMatchText) {
+        const groupId = mlsGroupMatchText[1];
+        try {
+          const result = await retrySend(() => bridge.mlsSendMessage(groupId, message));
+          return {
+            channel: "keychat" as const,
+            to: normalizedTo,
+            messageId: result.event_id,
+          };
+        } catch (err) {
+          console.warn(`[keychat] [${aid}] sendText to MLS group ${groupId} failed: ${err}`);
+          return {
+            channel: "keychat" as const,
+            to: normalizedTo,
+            messageId: `error-${Date.now()}`,
+          };
+        }
+      }
+
       // Handle /reset signal command — reset Signal session and re-send hello
       if (message.trim() === "/reset signal") {
         const result = await resetPeerSession(normalizedTo, aid, true);
@@ -476,6 +518,16 @@ export const keychatPlugin: ChannelPlugin<ResolvedKeychatAccount> = {
       const existingPeer = getPeerSessions(aid).get(normalizedTo);
       const hasSession = !!(existingPeer && existingPeer.signalPubkey);
       if (!hasSession) {
+        // Defensive: never send hello to non-pubkey targets (group IDs, prefixed targets, etc.)
+        if (normalizedTo.includes(":")) {
+          console.warn(`[keychat] [${aid}] sendText target "${normalizedTo}" is not a peer pubkey, skipping hello`);
+          return {
+            channel: "keychat" as const,
+            to: normalizedTo,
+            messageId: `skip-${Date.now()}`,
+          };
+        }
+
         // No session — need to send hello first and queue the message
         console.log(`[keychat] No session with ${normalizedTo}, initiating hello...`);
 

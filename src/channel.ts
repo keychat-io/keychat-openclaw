@@ -59,8 +59,61 @@ import { storeMnemonic, retrieveMnemonic } from "./keychain.js";
 import { parseMediaUrl, downloadAndDecrypt, encryptAndUpload } from "./media.js";
 import { transcribe, type SttConfig } from "./stt.js";
 import { join } from "node:path";
-import { existsSync, mkdirSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync } from "node:fs";
+import { homedir } from "node:os";
 import { signalDbPath, qrCodePath, WORKSPACE_KEYCHAT_DIR } from "./paths.js";
+
+// ═══════════════════════════════════════════════════════════════════════════
+// DM Policy enforcement — gate inbound messages before dispatch to agent
+// ═══════════════════════════════════════════════════════════════════════════
+
+/**
+ * Check if a sender is allowed to chat based on dmPolicy + allowFrom config + pairing store.
+ * Returns true if allowed, false if blocked.
+ */
+function isSenderAllowedByDmPolicy(
+  accountId: string,
+  senderNostrPubkey: string,
+  runtime: ReturnType<typeof getKeychatRuntime>,
+): boolean {
+  const cfg = runtime.config.loadConfig();
+  const account = resolveKeychatAccount({ cfg, accountId });
+  const policy = account.config.dmPolicy ?? "pairing";
+  
+  // "open" allows everyone
+  if (policy === "open") return true;
+  
+  // "disabled" blocks everyone
+  if (policy === "disabled") return false;
+
+  // Normalize sender pubkey for comparison
+  const senderNormalized = normalizePubkey(senderNostrPubkey);
+
+  // Collect allowFrom from config
+  const configAllowFrom = (account.config.allowFrom ?? []).map((e) => normalizePubkey(String(e)));
+  
+  // Read pairing store (credentials/keychat-allowFrom.json) — approved via /approve command
+  let storeAllowFrom: string[] = [];
+  try {
+    const storePath = join(homedir(), ".openclaw", "credentials", "keychat-allowFrom.json");
+    if (existsSync(storePath)) {
+      const store = JSON.parse(readFileSync(storePath, "utf-8"));
+      storeAllowFrom = (store.allowFrom ?? []).map((e: string) => normalizePubkey(String(e)));
+    }
+  } catch { /* ignore read errors */ }
+
+  // For "allowlist" mode: only config allowFrom is checked (not pairing store)
+  if (policy === "allowlist") {
+    return configAllowFrom.includes(senderNormalized) || storeAllowFrom.includes(senderNormalized);
+  }
+
+  // For "pairing" mode: check config allowFrom + pairing store
+  if (policy === "pairing") {
+    return configAllowFrom.includes(senderNormalized) || storeAllowFrom.includes(senderNormalized);
+  }
+
+  return false;
+}
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Task 7: Outbound message queue for offline/retry resilience
@@ -1311,10 +1364,22 @@ async function handleFriendRequestInner(
   }
 
   if (policy === "pairing" && !allowFrom.includes(senderNormalized)) {
-    // Not yet approved — we still establish the session (so we can send the pending message)
-    // but flag it for approval via OpenClaw's pairing system
-    ctx.log?.info(`[${accountId}] Friend request from ${msg.from_pubkey} — pending pairing approval`);
-    // Continue processing but will send a "pending approval" message instead of full access
+    // Check pairing store as well (approved via /approve)
+    let storeApproved = false;
+    try {
+      const storePath = join(homedir(), ".openclaw", "credentials", "keychat-allowFrom.json");
+      if (existsSync(storePath)) {
+        const store = JSON.parse(readFileSync(storePath, "utf-8"));
+        const storeEntries = (store.allowFrom ?? []).map((e: string) => normalizePubkey(String(e)));
+        storeApproved = storeEntries.includes(senderNormalized);
+      }
+    } catch { /* ignore */ }
+
+    if (!storeApproved) {
+      ctx.log?.info(`[${accountId}] Friend request from ${msg.from_pubkey} — pending pairing approval`);
+      // Continue processing to establish session (needed to send pending message)
+      // but mark as pending so we gate subsequent messages
+    }
   }
 
   // Process hello via bridge — establishes Signal session
@@ -2277,6 +2342,12 @@ async function dispatchToAgent(
   ctx: { log?: { info: (m: string) => void; error: (m: string) => void; warn?: (m: string) => void }; setStatus: (s: Record<string, unknown> | any) => void },
   mediaPath?: string,
 ): Promise<void> {
+  // ── DM Policy gate: block unauthorized senders before dispatch ──
+  if (!isSenderAllowedByDmPolicy(accountId, peerNostrPubkey, runtime)) {
+    ctx.log?.info(`[${accountId}] ⛔ Blocked message from ${peerNostrPubkey} — not authorized by dmPolicy`);
+    return;
+  }
+
   const core = runtime;
   const cfg = core.config.loadConfig();
 

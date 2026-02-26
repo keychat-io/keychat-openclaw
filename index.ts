@@ -89,7 +89,7 @@ function ensureConfig(): void {
     if (config.channels?.keychat) return;
 
     if (!config.channels) config.channels = {};
-    config.channels.keychat = { enabled: true, dmPolicy: "open" };
+    config.channels.keychat = { enabled: true, dmPolicy: "pairing" };
     writeFileSync(configPath, JSON.stringify(config, null, 2) + "\n", "utf-8");
     console.log("[keychat] ✅ Config initialized (channels.keychat.enabled = true)");
   } catch (err: any) {

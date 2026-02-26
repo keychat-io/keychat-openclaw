@@ -1,14 +1,27 @@
-import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
-import { emptyPluginConfigSchema } from "openclaw/plugin-sdk";
-import { keychatPlugin, getAgentKeychatId, getAgentKeychatUrl, getAllAgentContacts } from "./src/channel.js";
-import { setKeychatRuntime } from "./src/runtime.js";
 import { existsSync, mkdirSync, chmodSync, writeFileSync, readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { homedir } from "node:os";
+import { execSync } from "node:child_process";
 import https from "node:https";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
+
+// Auto-install dependencies if missing (e.g. after git clone without npm install)
+if (!existsSync(join(__dirname, "node_modules", "zod"))) {
+  console.log("[keychat] Dependencies missing, running npm install...");
+  try {
+    execSync("npm install --omit=dev --ignore-scripts", { cwd: __dirname, stdio: "inherit", timeout: 60_000 });
+    console.log("[keychat] Dependencies installed successfully");
+  } catch (e) {
+    throw new Error("[keychat] Failed to install dependencies. Run manually: cd " + __dirname + " && npm install");
+  }
+}
+
+import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
+import { emptyPluginConfigSchema } from "openclaw/plugin-sdk";
+import { keychatPlugin, getAgentKeychatId, getAgentKeychatUrl, getAllAgentContacts } from "./src/channel.js";
+import { setKeychatRuntime } from "./src/runtime.js";
 
 /** Download a URL following redirects, return a Buffer. */
 function downloadBinary(url: string): Promise<Buffer> {

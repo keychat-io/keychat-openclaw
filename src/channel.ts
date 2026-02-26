@@ -403,12 +403,12 @@ function markProcessed(bridge: KeychatBridgeClient, accountId: string, eventId: 
   }
   bridge.markEventProcessed(eventId, createdAt).catch(() => {/* best effort */});
 }
-// peerNostrPubkey → list of subscribed receiving addresses (most recent last, max MAX_RECEIVING_ADDRESSES per peer)
+// peerNostrPubkey → list of subscribed receiving addresses (most recent last, most recent last)
 const peerSubscribedAddresses = new Map<string, string[]>();
-// No upper limit — keep all ratchet-derived receiving addresses (matches Keychat app behavior).
-// Old addresses naturally become unused but are never proactively deleted to avoid
-// losing addresses that the remote peer may still be sending to.
-const MAX_RECEIVING_ADDRESSES = Infinity;
+// Minimum addresses to keep per peer after lazy cleanup (matches Keychat app: remainReceiveKeyPerRoom=2).
+// Old addresses are only cleaned up when a message is received on a newer address,
+// confirming the peer has moved on. Never delete proactively (e.g. at startup or after send).
+const REMAIN_RECEIVE_KEYS_PER_PEER = 2;
 
 // ═══════════════════════════════════════════════════════════════════════════
 // MLS (Large Group) state
@@ -1480,7 +1480,7 @@ async function handleFriendRequestInner(
     ctx.log?.error(`[${accountId}] Failed to send profile to ${hello.peer_nostr_pubkey}: ${e}`);
   }
 
-  // Handle receiving address rotation after send (per-peer, limited to MAX_RECEIVING_ADDRESSES)
+  // Handle receiving address rotation after send (per-peer, addresses persisted to DB)
   await handleReceivingAddressRotation(bridge, accountId, sendResult, hello.peer_nostr_pubkey);
 
   // Flush any pending messages that were waiting for this session
@@ -2035,11 +2035,11 @@ async function handleEncryptedDM(
           ctx.log?.info(`[${accountId}] ✅ Session established with ${senderNostrId} (signal: ${sigKey})`);
 
           // After PreKey decrypt, subscribe to receiving addresses for this new peer.
-          // alice_addrs from decrypt contains ratchet-derived addresses; take only latest MAX_RECEIVING_ADDRESSES.
+          // alice_addrs from decrypt contains ratchet-derived addresses; subscribe all alice_addrs.
           try {
             const aliceAddrs: string[] = decryptResult?.alice_addrs ?? [];
             if (aliceAddrs.length > 0) {
-              const latest = aliceAddrs.slice(-MAX_RECEIVING_ADDRESSES);
+              const latest = aliceAddrs;
               const newAddrs = latest.filter((a) => !getAddressToPeer(accountId).has(a));
               if (newAddrs.length > 0) {
                 await bridge.addSubscription(newAddrs);
@@ -2189,7 +2189,7 @@ async function handleEncryptedDM(
   try {
     const aliceAddrs: string[] = (decryptResult as any)?.alice_addrs ?? [];
     if (aliceAddrs.length > 0) {
-      const latest = aliceAddrs.slice(-MAX_RECEIVING_ADDRESSES);
+      const latest = aliceAddrs;
       const newAddrs = latest.filter((a) => !getAddressToPeer(accountId).has(a));
       if (newAddrs.length > 0) {
         await bridge.addSubscription(newAddrs);
@@ -2207,6 +2207,38 @@ async function handleEncryptedDM(
     }
   } catch (err) {
     ctx.log?.error(`[${accountId}] Failed to update receiving addresses after decrypt: ${err}`);
+  }
+
+  // Lazy cleanup: now that we received a message on msg.to_address, remove older
+  // addresses for this peer (keep REMAIN_RECEIVE_KEYS_PER_PEER most recent).
+  // This matches Keychat app's deleteReceiveKey behavior — only clean up when we
+  // have proof the peer is using a newer address.
+  if (peerNostrPubkey && msg.to_address) {
+    try {
+      const peerAddrs = peerSubscribedAddresses.get(peerNostrPubkey) ?? [];
+      const idx = peerAddrs.indexOf(msg.to_address);
+      if (idx >= 0 && peerAddrs.length > REMAIN_RECEIVE_KEYS_PER_PEER) {
+        // Keep addresses from (idx - REMAIN_RECEIVE_KEYS_PER_PEER + 1) onward
+        const keepFrom = Math.max(0, idx - REMAIN_RECEIVE_KEYS_PER_PEER + 1);
+        if (keepFrom > 0) {
+          const staleAddrs = peerAddrs.slice(0, keepFrom);
+          const remaining = peerAddrs.slice(keepFrom);
+          peerSubscribedAddresses.set(peerNostrPubkey, remaining);
+          for (const old of staleAddrs) {
+            getAddressToPeer(accountId).delete(old);
+            try { await bridge.removeSubscription([old]); } catch { /* */ }
+            try { await bridge.deleteAddressMapping(old); } catch { /* */ }
+          }
+          if (staleAddrs.length > 0) {
+            ctx.log?.info(
+              `[${accountId}] Lazy cleanup: removed ${staleAddrs.length} old address(es) for peer ${peerNostrPubkey.slice(0,16)}, kept ${remaining.length}`,
+            );
+          }
+        }
+      }
+    } catch (err) {
+      ctx.log?.error(`[${accountId}] Lazy address cleanup failed: ${err}`);
+    }
   }
 
   // The decrypted content may be a KeychatMessage JSON — extract the `msg` field

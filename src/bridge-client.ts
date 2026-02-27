@@ -7,6 +7,8 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { createInterface, type Interface } from "node:readline";
 import { join } from "node:path";
 import { existsSync } from "node:fs";
+import { homedir } from "node:os";
+import { createRequire } from "node:module";
 import { bridgeEnv } from "./paths.js";
 
 export interface AccountInfo {
@@ -37,6 +39,17 @@ type PendingRequest = {
   resolve: (value: unknown) => void;
   reject: (error: Error) => void;
 };
+
+type BetterSqlite3Database = {
+  exec(sql: string): void;
+  prepare(sql: string): {
+    run(...params: any[]): { lastInsertRowid?: number | bigint };
+    all(...params: any[]): any[];
+  };
+  close(): void;
+};
+
+const require = createRequire(import.meta.url);
 
 /** Inbound message pushed from the bridge when a relay delivers a DM. */
 export interface InboundMessage {
@@ -90,6 +103,7 @@ export class KeychatBridgeClient {
   private maxRestartAttempts = 5;
   private restartDelayMs = 1000;
   private initArgs: { dbPath?: string; mnemonic?: string; relays?: string[] } | null = null;
+  private signalDbPath: string | null = null;
 
   constructor(bridgePath?: string) {
     // Default: look for the binary relative to the extension directory
@@ -341,6 +355,7 @@ export class KeychatBridgeClient {
 
   /** Initialize Signal Protocol DB. */
   async init(dbPath: string): Promise<{ initialized: boolean; db_path: string }> {
+    this.signalDbPath = this.resolveDbPath(dbPath);
     return (await this.call("init", { db_path: dbPath })) as {
       initialized: boolean;
       db_path: string;
@@ -522,6 +537,52 @@ export class KeychatBridgeClient {
     return (await this.call("delete_address_mapping", { address })) as any;
   }
 
+  /** Persist a message queued while waiting for Protocol Step 3 accept-first. */
+  async savePendingHelloMessage(peerPubkey: string, text: string): Promise<{ id: number }> {
+    return this.withSignalDb((db) => {
+      this.ensurePendingHelloTable(db);
+      const createdAt = Math.floor(Date.now() / 1000);
+      const result = db
+        .prepare(
+          "INSERT INTO pending_hello_messages (peer_pubkey, message_text, created_at) VALUES (?, ?, ?)",
+        )
+        .run(peerPubkey, text, createdAt);
+      const rawId = result.lastInsertRowid ?? 0;
+      return { id: Number(rawId) };
+    });
+  }
+
+  /** Load persisted hello-queue messages for a peer. */
+  async getPendingHelloMessages(peerPubkey: string): Promise<{ messages: { id: number; text: string }[] }> {
+    return this.withSignalDb((db) => {
+      this.ensurePendingHelloTable(db);
+      const rows = db
+        .prepare(
+          "SELECT id, message_text FROM pending_hello_messages WHERE peer_pubkey = ? ORDER BY id ASC",
+        )
+        .all(peerPubkey) as Array<{ id: number; message_text: string }>;
+      return {
+        messages: rows.map((row) => ({ id: Number(row.id), text: row.message_text })),
+      };
+    });
+  }
+
+  /** Delete persisted hello-queue messages for a peer after successful flush. */
+  async deletePendingHelloMessages(peerPubkey: string): Promise<void> {
+    this.withSignalDb((db) => {
+      this.ensurePendingHelloTable(db);
+      db.prepare("DELETE FROM pending_hello_messages WHERE peer_pubkey = ?").run(peerPubkey);
+    });
+  }
+
+  /** Delete one persisted hello-queue message by row id. */
+  async deletePendingHelloMessageById(id: number): Promise<void> {
+    this.withSignalDb((db) => {
+      this.ensurePendingHelloTable(db);
+      db.prepare("DELETE FROM pending_hello_messages WHERE id = ?").run(id);
+    });
+  }
+
   /** Check if bridge is connected and responsive (ping with 5s timeout). */
   async isConnected(): Promise<boolean> {
     if (!this.process?.stdin?.writable) return false;
@@ -535,6 +596,48 @@ export class KeychatBridgeClient {
     } catch {
       return false;
     }
+  }
+
+  private resolveDbPath(input: string): string {
+    if (input.startsWith("~/")) {
+      return join(homedir(), input.slice(2));
+    }
+    return input;
+  }
+
+  private getSignalDbPathOrThrow(): string {
+    if (!this.signalDbPath) {
+      throw new Error("Signal DB path unavailable. Call init(dbPath) before pending hello operations.");
+    }
+    return this.signalDbPath;
+  }
+
+  private withSignalDb<T>(run: (db: BetterSqlite3Database) => T): T {
+    const dbPath = this.getSignalDbPathOrThrow();
+    let DbCtor: (new (filename: string) => BetterSqlite3Database) | null = null;
+    try {
+      DbCtor = require("better-sqlite3") as new (filename: string) => BetterSqlite3Database;
+    } catch {
+      const sqliteBuiltin = require("node:sqlite") as { DatabaseSync: new (filename: string) => BetterSqlite3Database };
+      DbCtor = sqliteBuiltin.DatabaseSync;
+    }
+    const db = new DbCtor(dbPath);
+    try {
+      return run(db);
+    } finally {
+      db.close();
+    }
+  }
+
+  private ensurePendingHelloTable(db: BetterSqlite3Database): void {
+    db.exec(
+      "CREATE TABLE IF NOT EXISTS pending_hello_messages (" +
+        "id INTEGER PRIMARY KEY AUTOINCREMENT, " +
+        "peer_pubkey TEXT NOT NULL, " +
+        "message_text TEXT NOT NULL, " +
+        "created_at INTEGER NOT NULL" +
+      ")",
+    );
   }
 
   /** Delete a Signal session for a peer. */

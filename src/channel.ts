@@ -283,45 +283,167 @@ const MAX_PENDING_QUEUE = 100;
 const MAX_MESSAGE_RETRIES = 5;
 
 // ═══════════════════════════════════════════════════════════════════════════
-// Pending hello messages — queued while waiting for session establishment
+// Friend request / hello state machine
 // ═══════════════════════════════════════════════════════════════════════════
 
-interface PendingHelloMessage {
-  text: string;
-  resolve: (result: { channel: "keychat"; to: string; messageId: string }) => void;
-  reject: (err: Error) => void;
-  timer: ReturnType<typeof setTimeout>;
+enum FriendRequestState {
+  IDLE = "IDLE",
+  WAIT_ACCEPT = "WAIT_ACCEPT",
+  SESSION_ESTABLISHED = "SESSION_ESTABLISHED",
+  NORMAL_CHAT = "NORMAL_CHAT",
 }
 
-/** Messages waiting for a hello reply to establish session. Keyed by peer nostr pubkey hex. */
-const pendingHelloMessages = new Map<string, PendingHelloMessage[]>();
-/** Peers we've already sent a hello to (avoid duplicate hellos). */
-const helloSentTo = new Set<string>();
-const HELLO_TIMEOUT_MS = 120_000; // 2 minutes to wait for hello reply
+interface FriendRequestPeerFlow {
+  state: FriendRequestState;
+  /** true = A-role (we sent hello, waiting for accept-first).
+   *  false = B-role (we received hello, sent accept-first back).
+   *  This determines flush/dispatch behavior after session establishment. */
+  initiatedByUs: boolean;
+}
 
-/** Flush pending hello messages for a peer after session is established. */
-async function flushPendingHelloMessages(bridge: KeychatBridgeClient, accountId: string, peerPubkey: string): Promise<void> {
-  const pending = pendingHelloMessages.get(peerPubkey);
-  if (!pending || pending.length === 0) return;
-  pendingHelloMessages.delete(peerPubkey);
-  helloSentTo.delete(peerPubkey);
+class FriendRequestManager {
+  private readonly flowsByAccount = new Map<string, Map<string, FriendRequestPeerFlow>>();
 
-  console.log(`[keychat] Flushing ${pending.length} pending message(s) to ${peerPubkey}`);
-  for (const msg of pending) {
-    clearTimeout(msg.timer);
-    try {
-      const result = await bridge.sendMessage(peerPubkey, msg.text);
-      await handleReceivingAddressRotation(bridge, accountId, result, peerPubkey);
-      msg.resolve({
-        channel: "keychat" as const,
-        to: peerPubkey,
-        messageId: result.event_id,
-      });
-    } catch (err) {
-      msg.reject(err instanceof Error ? err : new Error(String(err)));
+  private getFlows(accountId: string): Map<string, FriendRequestPeerFlow> {
+    let flows = this.flowsByAccount.get(accountId);
+    if (!flows) {
+      flows = new Map<string, FriendRequestPeerFlow>();
+      this.flowsByAccount.set(accountId, flows);
+    }
+    return flows;
+  }
+
+  private getOrCreateFlow(accountId: string, peerPubkey: string): FriendRequestPeerFlow {
+    const flows = this.getFlows(accountId);
+    let flow = flows.get(peerPubkey);
+    if (!flow) {
+      flow = {
+        state: FriendRequestState.IDLE,
+        initiatedByUs: false,
+      };
+      flows.set(peerPubkey, flow);
+    }
+    return flow;
+  }
+
+  getState(accountId: string, peerPubkey: string): FriendRequestState {
+    const flow = this.getFlows(accountId).get(peerPubkey);
+    return flow?.state ?? FriendRequestState.IDLE;
+  }
+
+  isWaitingAccept(accountId: string, peerPubkey: string): boolean {
+    return this.getState(accountId, peerPubkey) === FriendRequestState.WAIT_ACCEPT;
+  }
+
+  isInitiatorSidePending(accountId: string, peerPubkey: string): boolean {
+    const flow = this.getFlows(accountId).get(peerPubkey);
+    if (!flow) return false;
+    return flow.initiatedByUs;
+  }
+
+  hasSession(accountId: string, peerPubkey: string): boolean {
+    const state = this.getState(accountId, peerPubkey);
+    return state === FriendRequestState.SESSION_ESTABLISHED || state === FriendRequestState.NORMAL_CHAT;
+  }
+
+  setSessionEstablished(accountId: string, peerPubkey: string): void {
+    const flow = this.getOrCreateFlow(accountId, peerPubkey);
+    // Protocol Step 4: accept-first decrypted and Signal session established.
+    flow.state = FriendRequestState.SESSION_ESTABLISHED;
+  }
+
+  setNormalChat(accountId: string, peerPubkey: string): void {
+    const flow = this.getOrCreateFlow(accountId, peerPubkey);
+    flow.state = FriendRequestState.NORMAL_CHAT;
+  }
+
+  restoreWaitAccept(accountId: string, peerPubkey: string): void {
+    const flow = this.getOrCreateFlow(accountId, peerPubkey);
+    flow.state = FriendRequestState.WAIT_ACCEPT;
+    flow.initiatedByUs = true;
+  }
+
+  resetPeer(accountId: string, peerPubkey: string): void {
+    this.getFlows(accountId).delete(peerPubkey);
+  }
+
+  resetAccount(accountId: string): void {
+    this.flowsByAccount.delete(accountId);
+  }
+
+  async ensureOutgoingHelloAndHandshakeSubscriptions(
+    bridge: KeychatBridgeClient,
+    accountId: string,
+    peerPubkey: string,
+    senderName: string,
+  ): Promise<void> {
+    const flow = this.getOrCreateFlow(accountId, peerPubkey);
+    if (flow.state === FriendRequestState.WAIT_ACCEPT) return;
+    if (flow.state === FriendRequestState.SESSION_ESTABLISHED || flow.state === FriendRequestState.NORMAL_CHAT) return;
+
+    // Protocol Step 1: Send friend request (kind:1059 Gift Wrap).
+    const helloResult = await bridge.sendHello(peerPubkey, senderName);
+    flow.state = FriendRequestState.WAIT_ACCEPT;
+    flow.initiatedByUs = true;
+
+    // Protocol Step 3: accept-first is sent to A_onetimekey.
+    // curve25519 identity pubkey is NOT a receiving address; subscribing to it
+    // causes routing conflicts when multiple hellos are in flight.
+    const handshakeAddresses = new Set<string>();
+    if (helloResult.onetimekey) {
+      handshakeAddresses.add(helloResult.onetimekey);
+      getAddressToPeer(accountId).set(helloResult.onetimekey, peerPubkey);
+      try { await bridge.saveAddressMapping(helloResult.onetimekey, peerPubkey); } catch { /* best effort */ }
+    }
+    if (handshakeAddresses.size > 0) {
+      await bridge.addSubscription(Array.from(handshakeAddresses));
     }
   }
+
+  async queueUntilSession(
+    bridge: KeychatBridgeClient,
+    accountId: string,
+    peerPubkey: string,
+    text: string,
+  ): Promise<{ channel: "keychat"; to: string; messageId: string }> {
+    const { id } = await bridge.savePendingHelloMessage(peerPubkey, text);
+    this.getOrCreateFlow(accountId, peerPubkey).initiatedByUs = true;
+    return {
+      channel: "keychat" as const,
+      to: peerPubkey,
+      messageId: `pending-hello-${id}`,
+    };
+  }
+
+  async flushQueuedAfterSession(
+    bridge: KeychatBridgeClient,
+    accountId: string,
+    peerPubkey: string,
+  ): Promise<void> {
+    const flow = this.getOrCreateFlow(accountId, peerPubkey);
+    const { messages } = await bridge.getPendingHelloMessages(peerPubkey);
+    if (messages.length === 0) return;
+    let promotedToNormalChat = false;
+    for (const queued of messages) {
+      try {
+        const result = await bridge.sendMessage(peerPubkey, queued.text);
+        await handleReceivingAddressRotation(bridge, accountId, result, peerPubkey);
+        await bridge.deletePendingHelloMessageById(queued.id);
+        if (!promotedToNormalChat) {
+          // Protocol Step 5: first post-handshake send triggers ratchet switch.
+          // Protocol Step 6: after that first message is sent, treat this peer as NORMAL_CHAT.
+          flow.state = FriendRequestState.NORMAL_CHAT;
+          promotedToNormalChat = true;
+        }
+      } catch (err) {
+        throw err instanceof Error ? err : new Error(String(err));
+      }
+    }
+    flow.initiatedByUs = false;
+  }
 }
+
+const friendRequestManager = new FriendRequestManager();
 
 /** Flush pending outbound messages — called after bridge restart and periodically. */
 async function flushPendingOutbound(): Promise<void> {
@@ -493,8 +615,16 @@ function markProcessed(bridge: KeychatBridgeClient, accountId: string, eventId: 
   }
   bridge.markEventProcessed(eventId, createdAt).catch(() => {/* best effort */});
 }
-// peerNostrPubkey → list of subscribed receiving addresses (most recent last, most recent last)
-const peerSubscribedAddresses = new Map<string, string[]>();
+// per-account: peerNostrPubkey → subscribed receiving addresses (oldest..newest)
+const peerSubscribedAddressesByAccount = new Map<string, Map<string, string[]>>();
+function getPeerSubscribedAddresses(accountId: string): Map<string, string[]> {
+  let m = peerSubscribedAddressesByAccount.get(accountId);
+  if (!m) {
+    m = new Map<string, string[]>();
+    peerSubscribedAddressesByAccount.set(accountId, m);
+  }
+  return m;
+}
 // Minimum addresses to keep per peer after lazy cleanup (matches Keychat app: remainReceiveKeyPerRoom=2).
 // Old addresses are only cleaned up when a message is received on a newer address,
 // confirming the peer has moved on. Never delete proactively (e.g. at startup or after send).
@@ -718,9 +848,9 @@ export const keychatPlugin: ChannelPlugin<ResolvedKeychatAccount> = {
         };
       }
 
-      // Check if we have a session with this peer (placeholder mappings with empty signalPubkey don't count)
+      // Check if we have a session with this peer (placeholder mappings with empty signalPubkey don't count).
       const existingPeer = getPeerSessions(aid).get(normalizedTo);
-      const hasSession = !!(existingPeer && existingPeer.signalPubkey);
+      const hasSession = !!(existingPeer && existingPeer.signalPubkey) || friendRequestManager.hasSession(aid, normalizedTo);
       if (!hasSession) {
         // Defensive: never send hello to non-pubkey targets (group IDs, prefixed targets, etc.)
         if (normalizedTo.includes(":")) {
@@ -732,67 +862,23 @@ export const keychatPlugin: ChannelPlugin<ResolvedKeychatAccount> = {
           };
         }
 
-        // No session — need to send hello first and queue the message
+        // Protocol Step 1: No session yet, send friend request (kind:1059 Gift Wrap).
         console.log(`[keychat] No session with ${normalizedTo}, initiating hello...`);
-
-        // Send hello if we haven't already
-        if (!helloSentTo.has(normalizedTo)) {
-          helloSentTo.add(normalizedTo);
-          try {
-            const accountInfo = accountInfoCache.get(aid);
-            const name = accountInfo?.pubkey_npub ? "Keychat Agent" : "Keychat Agent";
-            const helloResult = await bridge.sendHello(normalizedTo, name);
-            console.log(`[keychat] Hello sent to ${normalizedTo} (event: ${helloResult.event_id})`);
-
-            // Register the onetimekey as an address mapping so the hello reply
-            // (sent to our onetimekey) can be routed to this peer.
-            if (helloResult.onetimekey) {
-              getAddressToPeer(aid).set(helloResult.onetimekey, normalizedTo);
-              console.log(`[keychat] Registered onetimekey ${helloResult.onetimekey.slice(0, 16)}... → ${normalizedTo.slice(0, 16)}`);
-              try {
-                await bridge.saveAddressMapping(helloResult.onetimekey, normalizedTo);
-              } catch { /* best effort */ }
-            }
-          } catch (err) {
-            helloSentTo.delete(normalizedTo);
-            console.error(`[keychat] Failed to send hello to ${normalizedTo}: ${err}`);
-            // Queue for later delivery
-            queueOutbound(normalizedTo, message, aid);
-            return {
-              channel: "keychat" as const,
-              to: normalizedTo,
-              messageId: `queued-${Date.now()}`,
-            };
-          }
+        try {
+          const name = "Keychat Agent";
+          await friendRequestManager.ensureOutgoingHelloAndHandshakeSubscriptions(
+            bridge,
+            aid,
+            normalizedTo,
+            name,
+          );
+        } catch (err) {
+          const reason = err instanceof Error ? err.message : String(err);
+          throw new Error(`Failed to send friend request hello to ${normalizedTo}: ${reason}`);
         }
 
-        // Queue the message and wait for session establishment
-        return new Promise<{ channel: "keychat"; to: string; messageId: string }>((resolve, reject) => {
-          const timer = setTimeout(() => {
-            // Timeout — remove from queue and reject
-            const pending = pendingHelloMessages.get(normalizedTo);
-            if (pending) {
-              const idx = pending.findIndex((m) => m.timer === timer);
-              if (idx >= 0) pending.splice(idx, 1);
-              if (pending.length === 0) {
-                pendingHelloMessages.delete(normalizedTo);
-                helloSentTo.delete(normalizedTo);
-              }
-            }
-            // Fall back to queuing for retry
-            queueOutbound(normalizedTo, message, aid);
-            resolve({
-              channel: "keychat" as const,
-              to: normalizedTo,
-              messageId: `queued-hello-timeout-${Date.now()}`,
-            });
-          }, HELLO_TIMEOUT_MS);
-
-          const entry: PendingHelloMessage = { text: message, resolve, reject, timer };
-          const existing = pendingHelloMessages.get(normalizedTo) ?? [];
-          existing.push(entry);
-          pendingHelloMessages.set(normalizedTo, existing);
-        });
+        // Protocol Step 3/4 window: queue outbound app messages until accept-first establishes session.
+        return friendRequestManager.queueUntilSession(bridge, aid, normalizedTo, message);
       }
 
       // Existing session — send directly
@@ -1153,6 +1239,7 @@ export const keychatPlugin: ChannelPlugin<ResolvedKeychatAccount> = {
               name: m.name,
               nostrPubkey: m.nostr_pubkey,
             });
+            friendRequestManager.setSessionEstablished(account.accountId, m.nostr_pubkey);
           }
         }
 
@@ -1164,11 +1251,29 @@ export const keychatPlugin: ChannelPlugin<ResolvedKeychatAccount> = {
           for (const am of addrMappings) {
             getAddressToPeer(account.accountId).set(am.address, am.peer_nostr_pubkey);
             // Track in peerSubscribedAddresses so cleanup works after restart
-            const peerList = peerSubscribedAddresses.get(am.peer_nostr_pubkey) ?? [];
+            const peerList = getPeerSubscribedAddresses(account.accountId).get(am.peer_nostr_pubkey) ?? [];
             peerList.push(am.address);
-            peerSubscribedAddresses.set(am.peer_nostr_pubkey, peerList);
+            getPeerSubscribedAddresses(account.accountId).set(am.peer_nostr_pubkey, peerList);
           }
           ctx.log?.info(`[${account.accountId}] Restored ${addrMappings.length} address-to-peer mapping(s) from DB`);
+        }
+
+        // Restore Protocol Step 1 WAIT_ACCEPT flows from persisted pending hello messages.
+        // This lets startup continue waiting for Protocol Step 3 accept-first on A_onetimekey.
+        const mappedPeers = new Set(addrMappings.map((m) => m.peer_nostr_pubkey));
+        let restoredWaitAcceptPeers = 0;
+        for (const peerPubkey of mappedPeers) {
+          try {
+            const { messages } = await bridge.getPendingHelloMessages(peerPubkey);
+            if (messages.length === 0) continue;
+            friendRequestManager.restoreWaitAccept(account.accountId, peerPubkey);
+            restoredWaitAcceptPeers++;
+          } catch {
+            // best effort per peer
+          }
+        }
+        if (restoredWaitAcceptPeers > 0) {
+          ctx.log?.info(`[${account.accountId}] Restored WAIT_ACCEPT for ${restoredWaitAcceptPeers} pending hello peer(s)`);
         }
 
         // Sync: add any alice_addrs from Signal sessions that are missing from DB.
@@ -1189,9 +1294,9 @@ export const keychatPlugin: ChannelPlugin<ResolvedKeychatAccount> = {
               if (getAddressToPeer(account.accountId).has(a.nostr_pubkey)) continue;
               // New address — add to memory and DB
               getAddressToPeer(account.accountId).set(a.nostr_pubkey, peerNostr);
-              const peerList = peerSubscribedAddresses.get(peerNostr) ?? [];
+              const peerList = getPeerSubscribedAddresses(account.accountId).get(peerNostr) ?? [];
               peerList.push(a.nostr_pubkey);
-              peerSubscribedAddresses.set(peerNostr, peerList);
+              getPeerSubscribedAddresses(account.accountId).set(peerNostr, peerList);
               try { await bridge.saveAddressMapping(a.nostr_pubkey, peerNostr); } catch { /* */ }
               addedCount++;
             }
@@ -1299,15 +1404,25 @@ export const keychatPlugin: ChannelPlugin<ResolvedKeychatAccount> = {
               name: m.name,
               nostrPubkey: m.nostr_pubkey,
             });
+            friendRequestManager.setSessionEstablished(account.accountId, m.nostr_pubkey);
           }
           // Restore address→peer mappings and peerSubscribedAddresses
           const { mappings: addrMappings } = await bridge.getAddressMappings();
-          peerSubscribedAddresses.clear();
+          getPeerSubscribedAddresses(account.accountId).clear();
           for (const am of addrMappings) {
             getAddressToPeer(account.accountId).set(am.address, am.peer_nostr_pubkey);
-            const peerList = peerSubscribedAddresses.get(am.peer_nostr_pubkey) ?? [];
+            const peerList = getPeerSubscribedAddresses(account.accountId).get(am.peer_nostr_pubkey) ?? [];
             peerList.push(am.address);
-            peerSubscribedAddresses.set(am.peer_nostr_pubkey, peerList);
+            getPeerSubscribedAddresses(account.accountId).set(am.peer_nostr_pubkey, peerList);
+          }
+          const restartMappedPeers = new Set(addrMappings.map((m) => m.peer_nostr_pubkey));
+          for (const peerPubkey of restartMappedPeers) {
+            try {
+              const { messages } = await bridge.getPendingHelloMessages(peerPubkey);
+              if (messages.length > 0) {
+                friendRequestManager.restoreWaitAccept(account.accountId, peerPubkey);
+              }
+            } catch { /* best effort */ }
           }
           // Re-subscribe to receiving addresses from address_peer_mapping
           const toSubRestart = Array.from(getAddressToPeer(account.accountId).keys());
@@ -1414,6 +1529,11 @@ export const keychatPlugin: ChannelPlugin<ResolvedKeychatAccount> = {
       await bridge.stop();
       activeBridges.delete(account.accountId);
       accountInfoCache.delete(account.accountId);
+      peerSessionsByAccount.delete(account.accountId);
+      addressToPeerByAccount.delete(account.accountId);
+      seenEventIdsByAccount.delete(account.accountId);
+      peerSubscribedAddressesByAccount.delete(account.accountId);
+      friendRequestManager.resetAccount(account.accountId);
       bridgeReadyPromises.delete(account.accountId);
       bridgeReadyResolvers.delete(account.accountId);
       ctx.log?.info(`[${account.accountId}] Keychat provider stopped`);
@@ -1491,7 +1611,7 @@ async function handleFriendRequestInner(
     isPairingPending = false;
   }
 
-  // Process hello via bridge — establishes Signal session
+  // Protocol Step 2/3/4: Process inbound friend request and establish Signal session.
   const hello = await bridge.processHello(msg.encrypted_content);
   if (!hello.session_established) {
     ctx.log?.error(`[${accountId}] Failed to establish session from hello`);
@@ -1524,11 +1644,14 @@ async function handleFriendRequestInner(
   }
 
   getPeerSessions(accountId).set(hello.peer_nostr_pubkey, peer);
+  // B-role: Protocol Step 2-3 — received hello, built X3DH session, sending accept-first.
+  // initiatedByUs stays false (default) since we are the responder.
+  friendRequestManager.setSessionEstablished(accountId, hello.peer_nostr_pubkey);
 
   // NOTE: peer mapping already persisted by Rust handle_process_hello (with local Signal keys).
   // Do NOT call savePeerMapping here — it would overwrite local_signal_pubkey/privkey with NULL.
 
-  // Auto-reply with hello
+  // Protocol Step 3: Receiver sends accept-first as kind:4 PreKey to initiator onetimekey.
   let pairingGreeting = "";
   if (isPairingPending) {
     const { code } = upsertKeychatPairingRequest(msg.from_pubkey, { name: hello.peer_name }, accountId);
@@ -1562,21 +1685,22 @@ async function handleFriendRequestInner(
   // Handle receiving address rotation after send (per-peer, addresses persisted to DB)
   await handleReceivingAddressRotation(bridge, accountId, sendResult, hello.peer_nostr_pubkey);
 
-  // Flush any pending messages that were waiting for this session
-  if (pendingHelloMessages.has(hello.peer_nostr_pubkey)) {
+  const initiatedByUs = friendRequestManager.isInitiatorSidePending(accountId, hello.peer_nostr_pubkey);
+
+  // Flush any pending messages that were waiting for this session.
+  if (initiatedByUs) {
     ctx.log?.info(`[${accountId}] Flushing pending hello messages for ${hello.peer_nostr_pubkey}`);
-    await flushPendingHelloMessages(bridge, accountId, hello.peer_nostr_pubkey);
+    await friendRequestManager.flushQueuedAfterSession(bridge, accountId, hello.peer_nostr_pubkey);
   }
 
   // Dispatch the peer's greeting through the agent pipeline so the AI can generate a proper welcome
   // But skip dispatch if we initiated the hello (we already know who they are)
-  const weInitiated = helloSentTo.has(hello.peer_nostr_pubkey) || pendingHelloMessages.has(hello.peer_nostr_pubkey);
+  const weInitiated = initiatedByUs;
   if (!weInitiated) {
     const greetingText = `[New contact] ${hello.peer_name} connected via Keychat. Their greeting: ${hello.greeting || "(no message)"}`;
     await dispatchToAgent(bridge, accountId, hello.peer_nostr_pubkey, hello.peer_name, greetingText, msg.event_id + "_hello", runtime, ctx);
   } else {
     ctx.log?.info(`[${accountId}] Skipping dispatch for self-initiated hello to ${hello.peer_nostr_pubkey}`);
-    helloSentTo.delete(hello.peer_nostr_pubkey);
   }
 }
 
@@ -1994,73 +2118,38 @@ async function handleEncryptedDM(
   ctx: { log?: { info: (m: string) => void; error: (m: string) => void; warn?: (m: string) => void }; setStatus: (s: Record<string, unknown> | any) => void },
   runtime: ReturnType<typeof getKeychatRuntime>,
 ): Promise<void> {
-  // from_pubkey is EPHEMERAL — use to_address to find the actual peer
+  // kind:4 is published from an ephemeral event key, so from_pubkey is not a stable peer identifier.
+  // to_address is authoritative because it is our subscribed receiving address used for routing.
+  // Resolve by to_address first from in-memory map, then DB mapping cache.
   let peerNostrPubkey: string | null = null;
   if (msg.to_address) {
     peerNostrPubkey = getAddressToPeer(accountId).get(msg.to_address) ?? null;
+    if (!peerNostrPubkey) {
+      try {
+        const { mappings: dbMappings } = await bridge.getAddressMappings();
+        const found = dbMappings.find((m) => m.address === msg.to_address);
+        if (found) {
+          peerNostrPubkey = found.peer_nostr_pubkey;
+          getAddressToPeer(accountId).set(msg.to_address, peerNostrPubkey);
+          ctx.log?.info(`[${accountId}] Resolved peer from DB address mapping: ${peerNostrPubkey}`);
+        }
+      } catch { /* best effort */ }
+    }
   }
 
-  // Fallback: try from_pubkey directly (may work for initial messages)
-  if (!peerNostrPubkey) {
-    peerNostrPubkey = getPeerSessions(accountId).has(msg.from_pubkey) ? msg.from_pubkey : null;
-  }
-
-  // Fallback: query DB for address mapping before brute-force
-  if (!peerNostrPubkey && msg.to_address) {
-    try {
-      const { mappings: dbMappings } = await bridge.getAddressMappings();
-      const found = dbMappings.find((m) => m.address === msg.to_address);
-      if (found) {
-        peerNostrPubkey = found.peer_nostr_pubkey;
-        getAddressToPeer(accountId).set(msg.to_address, peerNostrPubkey);
-        ctx.log?.info(`[${accountId}] Resolved peer from DB address mapping: ${peerNostrPubkey}`);
-      }
-    } catch { /* DB lookup failed */ }
-  }
-
-  // ---- PreKey-based peer identification (replaces brute-force) ----
-  // If we still can't identify the peer, try the PreKey path: extract the
-  // Signal identity key from the ciphertext and look up the peer directly.
-  // This is deterministic and avoids the old brute-force fallback.
+  // Protocol Step 3: accept-first arrives on A_onetimekey as a kind:4 PreKey message.
+  // Only this path can establish a new session before normal routing metadata exists.
   const hasPeerSession = peerNostrPubkey ? getPeerSessions(accountId).has(peerNostrPubkey) : false;
   ctx.log?.info(`[${accountId}] DEBUG: peerNostrPubkey=${peerNostrPubkey}, hasPeerSession=${hasPeerSession}, is_prekey=${msg.is_prekey}, to_address=${msg.to_address}`);
   if ((!peerNostrPubkey || !hasPeerSession) && msg.is_prekey) {
-    ctx.log?.info(`[${accountId}] Entering PreKey path, encrypted_content length=${msg.encrypted_content?.length}, first40=${msg.encrypted_content?.slice(0, 40)}`);
     try {
       const prekeyInfo = await bridge.parsePrekeySender(msg.encrypted_content);
       ctx.log?.info(`[${accountId}] parsePrekeySender result: is_prekey=${prekeyInfo.is_prekey}, signal_identity_key=${prekeyInfo.signal_identity_key}`);
       if (prekeyInfo.is_prekey && prekeyInfo.signal_identity_key) {
         const sigKey = prekeyInfo.signal_identity_key;
-        ctx.log?.info(`[${accountId}] PreKey message detected — signal identity: ${sigKey}`);
-
-        // Strategy 1: Look up Signal key in existing getPeerSessions
-        for (const [nostrPk, ps] of getPeerSessions(accountId)) {
-          if (ps.signalPubkey === sigKey) {
-            peerNostrPubkey = nostrPk;
-            ctx.log?.info(`[${accountId}] PreKey routed to existing peer ${nostrPk} via signal key match`);
-            break;
-          }
-        }
-
-        // Strategy 2: Look up in DB peer_mapping
-        if (!peerNostrPubkey) {
-          try {
-            const { mappings } = await bridge.getPeerMappings();
-            const found = mappings.find((m) => m.signal_pubkey === sigKey);
-            if (found) {
-              peerNostrPubkey = found.nostr_pubkey;
-              ctx.log?.info(`[${accountId}] PreKey routed to peer ${peerNostrPubkey} via DB peer_mapping`);
-            }
-          } catch { /* DB lookup failed */ }
-        }
-
-        // Strategy 3: This is a new peer replying to our hello.
-        // Use signed_prekey_id from the PreKey header to deterministically identify
-        // which peer this reply belongs to (mapped when we sent the hello).
+        // Identify the sender deterministically for accept-first:
+        // 1) signed_pre_key_id mapping (preferred), 2) to_address/onetimekey mapping.
         if (!peerNostrPubkey || !getPeerSessions(accountId).has(peerNostrPubkey)) {
-          ctx.log?.info(`[${accountId}] PreKey from unknown signal key ${sigKey} — identifying sender via signed_prekey_id`);
-
-          // Look up peer by signed_prekey_id (deterministic, no guessing)
           let senderNostrId: string | null = null;
           let senderName = sigKey.slice(0, 12);
           if (prekeyInfo.signed_pre_key_id != null) {
@@ -2075,7 +2164,7 @@ async function handleEncryptedDM(
             }
           }
 
-          // Fallback: use peerNostrPubkey from addressToPeer (onetimekey mapping)
+          // Fallback to onetimekey routing mapping from Protocol Step 1 hello.
           if (!senderNostrId && peerNostrPubkey) {
             senderNostrId = peerNostrPubkey;
             ctx.log?.info(`[${accountId}] PreKey sender identified via onetimekey addressToPeer mapping: ${senderNostrId}`);
@@ -2088,7 +2177,7 @@ async function handleEncryptedDM(
             return;
           }
 
-          // Now decrypt the PreKey message
+          // Protocol Step 4: Reproduce X3DH and decrypt accept-first PreKey payload.
           const decryptResult = await bridge.decryptMessage(sigKey, msg.encrypted_content, true);
           const { plaintext } = decryptResult;
 
@@ -2111,33 +2200,25 @@ async function handleEncryptedDM(
           try { await bridge.clearPrekeyMaterial(senderNostrId); } catch { /* best effort */ }
           ctx.log?.info(`[${accountId}] ✅ Session established with ${senderNostrId} (signal: ${sigKey})`);
 
-          // After PreKey decrypt, subscribe to receiving addresses for this new peer.
-          // alice_addrs from decrypt contains ratchet-derived addresses; subscribe all alice_addrs.
+          // A-role: Protocol Step 4 — received accept-first, reproduced X3DH, session established.
+          // initiatedByUs was already set to true when we sent the hello (ensureOutgoingHelloAndHandshakeSubscriptions).
+          friendRequestManager.setSessionEstablished(accountId, senderNostrId);
+
+          // Step 4: after accept-first decrypt, subscribe to per-peer ratchet addresses from alice_addrs.
+          // Never use getReceivingAddresses() here; that returns all peers and can misroute.
           try {
             const aliceAddrs: string[] = decryptResult?.alice_addrs ?? [];
-            if (aliceAddrs.length > 0) {
-              const latest = aliceAddrs;
-              const newAddrs = latest.filter((a) => !getAddressToPeer(accountId).has(a));
-              if (newAddrs.length > 0) {
-                await bridge.addSubscription(newAddrs);
-                const peerAddrs = peerSubscribedAddresses.get(senderNostrId!) ?? [];
-                for (const a of newAddrs) {
-                  getAddressToPeer(accountId).set(a, senderNostrId!);
-                  peerAddrs.push(a);
-                  try { await bridge.saveAddressMapping(a, senderNostrId!); } catch { /* */ }
-                }
-                peerSubscribedAddresses.set(senderNostrId!, peerAddrs);
-                ctx.log?.info(`[${accountId}] Registered ${newAddrs.length} receiving address(es) for new peer ${senderNostrId!.slice(0,16)} (total ${peerAddrs.length})`);
-              }
+            const added = await registerPeerReceivingAddresses(bridge, accountId, senderNostrId, aliceAddrs);
+            if (added > 0) {
+              const total = getPeerSubscribedAddresses(accountId).get(senderNostrId)?.length ?? 0;
+              ctx.log?.info(`[${accountId}] Registered ${added} receiving address(es) for new peer ${senderNostrId.slice(0,16)} (total ${total})`);
             }
           } catch { /* best effort */ }
 
-          // Flush pending hello messages now that session is established
-          if (pendingHelloMessages.has(senderNostrId)) {
-            ctx.log?.info(`[${accountId}] Flushing ${pendingHelloMessages.get(senderNostrId)?.length} pending message(s) to ${senderNostrId}`);
-            await flushPendingHelloMessages(bridge, accountId, senderNostrId);
+          const initiatedByUs = friendRequestManager.isInitiatorSidePending(accountId, senderNostrId);
+          if (initiatedByUs) {
+            await friendRequestManager.flushQueuedAfterSession(bridge, accountId, senderNostrId);
           }
-          helloSentTo.delete(senderNostrId);
 
           // Parse and dispatch the decrypted content
           let displayText = plaintext;
@@ -2159,7 +2240,7 @@ async function handleEncryptedDM(
             // If this is a PrekeyMessageModel (hello reply wrapper), don't dispatch to agent
             if (parsed?.nostrId && parsed?.signalId) {
               ctx.log?.info(`[${accountId}] Hello reply from ${senderNostrId}: ${displayText.slice(0, 80)}`);
-              return; // Protocol overhead — don't dispatch
+              return; // Protocol handshake overhead — don't dispatch
             }
           } catch { /* not JSON — dispatch as regular message */ }
 
@@ -2221,28 +2302,20 @@ async function handleEncryptedDM(
     return;
   }
   const { plaintext } = decryptResult;
+  // State transitions are constrained to:
+  // - Protocol Step 4: setSessionEstablished in accept-first handlers.
+  // - Protocol Step 5/6: set NORMAL_CHAT only when flushing first queued post-handshake send.
 
-  // After decrypt, use alice_addrs from decrypt result (per-peer ratchet addresses).
-  // handleReceivingAddressRotation handles the per-message new_receiving_address from send;
-  // for decrypt, we use alice_addrs which contains the current peer's ratchet addresses.
+  // Step 5+: after decrypt, use ONLY alice_addrs from this message (per-peer ratchet addresses).
+  // Do not call getReceivingAddresses() here because it is global across all peers.
   try {
     const aliceAddrs: string[] = (decryptResult as any)?.alice_addrs ?? [];
-    if (aliceAddrs.length > 0) {
-      const latest = aliceAddrs;
-      const newAddrs = latest.filter((a) => !getAddressToPeer(accountId).has(a));
-      if (newAddrs.length > 0) {
-        await bridge.addSubscription(newAddrs);
-        const peerAddrs = peerSubscribedAddresses.get(peerNostrPubkey) ?? [];
-        for (const a of newAddrs) {
-          getAddressToPeer(accountId).set(a, peerNostrPubkey);
-          peerAddrs.push(a);
-          try { await bridge.saveAddressMapping(a, peerNostrPubkey); } catch { /* */ }
-        }
-        peerSubscribedAddresses.set(peerNostrPubkey, peerAddrs);
-        ctx.log?.info(
-          `[${accountId}] Updated ${newAddrs.length} receiving address(es) after decrypt (peer: ${peerNostrPubkey.slice(0,16)}, total ${peerAddrs.length})`,
-        );
-      }
+    const newAddrs = await registerPeerReceivingAddresses(bridge, accountId, peerNostrPubkey, aliceAddrs);
+    if (newAddrs > 0) {
+      const peerAddrs = getPeerSubscribedAddresses(accountId).get(peerNostrPubkey) ?? [];
+      ctx.log?.info(
+        `[${accountId}] Updated ${newAddrs} receiving address(es) after decrypt (peer: ${peerNostrPubkey.slice(0,16)}, total ${peerAddrs.length})`,
+      );
     }
   } catch (err) {
     ctx.log?.error(`[${accountId}] Failed to update receiving addresses after decrypt: ${err}`);
@@ -2254,7 +2327,7 @@ async function handleEncryptedDM(
   // have proof the peer is using a newer address.
   if (peerNostrPubkey && msg.to_address) {
     try {
-      const peerAddrs = peerSubscribedAddresses.get(peerNostrPubkey) ?? [];
+      const peerAddrs = getPeerSubscribedAddresses(accountId).get(peerNostrPubkey) ?? [];
       const idx = peerAddrs.indexOf(msg.to_address);
       if (idx >= 0 && peerAddrs.length > REMAIN_RECEIVE_KEYS_PER_PEER) {
         // Keep addresses from (idx - REMAIN_RECEIVE_KEYS_PER_PEER + 1) onward
@@ -2262,7 +2335,7 @@ async function handleEncryptedDM(
         if (keepFrom > 0) {
           const staleAddrs = peerAddrs.slice(0, keepFrom);
           const remaining = peerAddrs.slice(keepFrom);
-          peerSubscribedAddresses.set(peerNostrPubkey, remaining);
+          getPeerSubscribedAddresses(accountId).set(peerNostrPubkey, remaining);
           for (const old of staleAddrs) {
             getAddressToPeer(accountId).delete(old);
             try { await bridge.removeSubscription([old]); } catch { /* */ }
@@ -2705,6 +2778,28 @@ async function dispatchGroupToAgent(
   await flushDeliverBuffer();
 }
 
+/** Subscribe + persist per-peer receiving addresses derived from ratchet updates. */
+async function registerPeerReceivingAddresses(
+  bridge: KeychatBridgeClient,
+  accountId: string,
+  peerNostrPubkey: string,
+  addresses: string[],
+): Promise<number> {
+  const unique = Array.from(new Set(addresses.filter(Boolean)));
+  const newAddrs = unique.filter((a) => !getAddressToPeer(accountId).has(a));
+  if (newAddrs.length === 0) return 0;
+
+  await bridge.addSubscription(newAddrs);
+  const peerAddrs = getPeerSubscribedAddresses(accountId).get(peerNostrPubkey) ?? [];
+  for (const addr of newAddrs) {
+    getAddressToPeer(accountId).set(addr, peerNostrPubkey);
+    peerAddrs.push(addr);
+    try { await bridge.saveAddressMapping(addr, peerNostrPubkey); } catch { /* best effort */ }
+  }
+  getPeerSubscribedAddresses(accountId).set(peerNostrPubkey, peerAddrs);
+  return newAddrs.length;
+}
+
 /** After each send or decrypt, rotate receiving addresses if a new one was generated. */
 async function handleReceivingAddressRotation(
   bridge: KeychatBridgeClient,
@@ -2716,26 +2811,11 @@ async function handleReceivingAddressRotation(
 
   const { address } = await bridge.computeAddress(sendResult.new_receiving_address);
 
-  // Map the new address to the peer (in-memory + DB)
-  if (peerKey) {
-    getAddressToPeer(accountId).set(address, peerKey);
-    try {
-      await bridge.saveAddressMapping(address, peerKey);
-      console.log(`[keychat] handleReceivingAddressRotation: saved ${address.slice(0,16)} → ${peerKey.slice(0,16)} to DB`);
-    } catch (err) {
-      console.error(`[keychat] handleReceivingAddressRotation: saveAddressMapping FAILED for ${address.slice(0,16)} → ${peerKey.slice(0,16)}: ${err}`);
-    }
-  } else {
+  if (!peerKey) {
     console.warn(`[keychat] handleReceivingAddressRotation: peerKey is falsy, skipping DB save for ${address.slice(0,16)}`);
+    return;
   }
-
-  const peerAddrKey = peerKey || accountId;
-  const addrs = peerSubscribedAddresses.get(peerAddrKey) ?? [];
-  addrs.push(address);
-  peerSubscribedAddresses.set(peerAddrKey, addrs);
-
-  // Add new address to relay subscription (never remove old ones)
-  await bridge.addSubscription([address]);
+  await registerPeerReceivingAddresses(bridge, accountId, peerKey, [address]);
 }
 
 /**
@@ -2895,28 +2975,26 @@ export async function resetPeerSession(
     }
   }
 
-  // Clear from helloSentTo to allow re-sending
-  helloSentTo.delete(normalizedPeer);
-  pendingHelloMessages.delete(normalizedPeer);
+  // Reset friend-request state machine for this peer.
+  friendRequestManager.resetPeer(accountId, normalizedPeer);
+  try { await bridge.deletePendingHelloMessages(normalizedPeer); } catch { /* best effort */ }
+  getPeerSubscribedAddresses(accountId).delete(normalizedPeer);
 
   console.log(`[keychat] [${accountId}] Session reset for peer ${normalizedPeer}`);
 
   // 4. Optionally re-send hello
   if (resendHello) {
     try {
-      const accountInfo = accountInfoCache.get(accountId);
-      const name = accountInfo?.pubkey_npub ?? "Keychat Agent";
-      helloSentTo.add(normalizedPeer);
-      const helloResult = await bridge.sendHello(normalizedPeer, name);
-      console.log(`[keychat] [${accountId}] Hello re-sent to ${normalizedPeer} (event: ${helloResult.event_id})`);
-
-      if (helloResult.onetimekey) {
-        getAddressToPeer(accountId).set(helloResult.onetimekey, normalizedPeer);
-        try { await bridge.saveAddressMapping(helloResult.onetimekey, normalizedPeer); } catch { /* */ }
-      }
+      const name = "Keychat Agent";
+      await friendRequestManager.ensureOutgoingHelloAndHandshakeSubscriptions(
+        bridge,
+        accountId,
+        normalizedPeer,
+        name,
+      );
+      console.log(`[keychat] [${accountId}] Hello re-sent to ${normalizedPeer}`);
       return { reset: true, helloSent: true };
     } catch (err) {
-      helloSentTo.delete(normalizedPeer);
       console.error(`[keychat] [${accountId}] Failed to re-send hello: ${err}`);
       return { reset: true, helloSent: false, error: `Reset OK but hello failed: ${err}` };
     }

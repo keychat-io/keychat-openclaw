@@ -673,6 +673,9 @@ impl SignalManager {
         let _ = signal_store::sqlx::query(
             "ALTER TABLE peer_mapping ADD COLUMN signed_prekey_id INTEGER"
         ).execute(self.pool.database()).await;
+        let _ = signal_store::sqlx::query(
+            "ALTER TABLE peer_mapping ADD COLUMN onetimekey TEXT"
+        ).execute(self.pool.database()).await;
         Ok(())
     }
 
@@ -739,11 +742,28 @@ impl SignalManager {
         local_signal_privkey: Option<&str>,
         signed_prekey_id: Option<u32>,
     ) -> Result<()> {
+        self.save_peer_mapping_full_with_spk_otk(
+            nostr_pubkey, signal_pubkey, device_id, name,
+            local_signal_pubkey, local_signal_privkey, signed_prekey_id, None,
+        ).await
+    }
+
+    pub async fn save_peer_mapping_full_with_spk_otk(
+        &self,
+        nostr_pubkey: &str,
+        signal_pubkey: &str,
+        device_id: u32,
+        name: &str,
+        local_signal_pubkey: Option<&str>,
+        local_signal_privkey: Option<&str>,
+        signed_prekey_id: Option<u32>,
+        onetimekey: Option<&str>,
+    ) -> Result<()> {
         let now = SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)?
             .as_secs() as i64;
         signal_store::sqlx::query(
-            "INSERT OR REPLACE INTO peer_mapping (nostr_pubkey, signal_pubkey, device_id, name, created_at, local_signal_pubkey, local_signal_privkey, signed_prekey_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
+            "INSERT OR REPLACE INTO peer_mapping (nostr_pubkey, signal_pubkey, device_id, name, created_at, local_signal_pubkey, local_signal_privkey, signed_prekey_id, onetimekey) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
         )
         .bind(nostr_pubkey)
         .bind(signal_pubkey)
@@ -753,6 +773,7 @@ impl SignalManager {
         .bind(local_signal_pubkey)
         .bind(local_signal_privkey)
         .bind(signed_prekey_id.map(|id| id as i64))
+        .bind(onetimekey)
         .execute(self.pool.database())
         .await?;
         Ok(())
@@ -789,13 +810,14 @@ impl SignalManager {
     /// Returns: Vec<(nostr_pubkey, signal_pubkey, device_id, name, local_signal_pubkey, local_signal_privkey)>
     pub async fn get_all_peer_mappings(&self) -> Result<Vec<(String, String, i64, String)>> {
         let full = self.get_all_peer_mappings_full().await?;
-        Ok(full.into_iter().map(|(n, s, d, name, _, _)| (n, s, d, name)).collect())
+        Ok(full.into_iter().map(|(n, s, d, name, _, _, _)| (n, s, d, name)).collect())
     }
 
     /// Get all peer mappings with local signal key info.
-    pub async fn get_all_peer_mappings_full(&self) -> Result<Vec<(String, String, i64, String, Option<String>, Option<String>)>> {
+    /// Returns (nostr_pubkey, signal_pubkey, device_id, name, local_signal_pubkey, local_signal_privkey, onetimekey).
+    pub async fn get_all_peer_mappings_full(&self) -> Result<Vec<(String, String, i64, String, Option<String>, Option<String>, Option<String>)>> {
         let rows = signal_store::sqlx::query(
-            "SELECT nostr_pubkey, signal_pubkey, device_id, name, local_signal_pubkey, local_signal_privkey FROM peer_mapping ORDER BY created_at"
+            "SELECT nostr_pubkey, signal_pubkey, device_id, name, local_signal_pubkey, local_signal_privkey, onetimekey FROM peer_mapping ORDER BY created_at"
         )
         .fetch_all(self.pool.database())
         .await?;
@@ -807,9 +829,19 @@ impl SignalManager {
             let name: String = row.get::<String, _>(3);
             let local_sig_pk: Option<String> = row.try_get::<String, _>(4).ok();
             let local_sig_sk: Option<String> = row.try_get::<String, _>(5).ok();
-            result.push((nostr_pk, signal_pk, device_id, name, local_sig_pk, local_sig_sk));
+            let otk: Option<String> = row.try_get::<String, _>(6).ok();
+            result.push((nostr_pk, signal_pk, device_id, name, local_sig_pk, local_sig_sk, otk));
         }
         Ok(result)
+    }
+
+    /// Clear onetimekey from DB after it's been used (one-time use).
+    pub async fn clear_onetimekey(&self, nostr_pubkey: &str) -> Result<()> {
+        signal_store::sqlx::query("UPDATE peer_mapping SET onetimekey = NULL WHERE nostr_pubkey = ?")
+            .bind(nostr_pubkey)
+            .execute(self.pool.database())
+            .await?;
+        Ok(())
     }
 
     pub async fn delete_peer_mapping(&self, nostr_pubkey: &str) -> Result<()> {

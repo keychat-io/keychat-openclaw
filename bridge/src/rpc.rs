@@ -234,7 +234,7 @@ impl BridgeState {
             let signal = self.signal.as_mut().unwrap();
             if let Ok(mappings) = signal.get_all_peer_mappings_full().await {
                 let mut restored = 0u32;
-                for (_nostr_pk, _signal_pk, _device_id, _name, local_pk, local_sk) in &mappings {
+                for (_nostr_pk, _signal_pk, _device_id, _name, local_pk, local_sk, _otk) in &mappings {
                     if let (Some(lpk), Some(lsk)) = (local_pk, local_sk) {
                         if lpk.is_empty() || lsk.is_empty() { continue; }
                         if let Err(e) = signal.restore_ephemeral_store(lpk, lsk) {
@@ -442,16 +442,20 @@ impl BridgeState {
         self.peers.insert(qr_model.pubkey.clone(), peer);
 
         // Persist peer mapping (incoming hello uses account's default signal key)
+        // Include onetimekey so it survives bridge restart (needed to send accept-first to correct address)
         let local_sig_pk = account.signal_pubkey_hex();
         let local_sig_sk = hex::encode(&account.signal_private_key_bytes());
+        let otk = if qr_model.onetimekey.is_empty() { None } else { Some(qr_model.onetimekey.as_str()) };
         signal
-            .save_peer_mapping_full(
+            .save_peer_mapping_full_with_spk_otk(
                 &qr_model.pubkey,
                 &qr_model.curve25519_pk_hex,
                 device_id,
                 &qr_model.name,
                 Some(&local_sig_pk),
                 Some(&local_sig_sk),
+                None,
+                otk,
             )
             .await?;
 
@@ -675,7 +679,7 @@ impl BridgeState {
                                 nostr_pubkey: m.0.clone(),
                                 curve25519_pk_hex: m.1.clone(),
                                 device_id: m.2 as u32,
-                                onetimekey: None,
+                                onetimekey: m.6.clone().filter(|s| !s.is_empty()),
                             };
                             self.peers.insert(to_str.clone(), restored_peer.clone());
                             peer = Some(restored_peer);
@@ -836,10 +840,14 @@ impl BridgeState {
             .send_keychat_dm(&sender_keys, &receiver_pubkeys, &b64_ciphertext)
             .await?;
 
-        // If we sent to onetimekey, clear it (one-time use)
+        // If we sent to onetimekey, clear it from memory and DB (one-time use)
         if sending_to_onetimekey {
             if let Some(p) = self.peers.get_mut(&to_str) {
                 p.onetimekey = None;
+            }
+            // Clear from DB too so it's not restored on restart
+            if let Some(sig) = self.signal.as_ref() {
+                let _ = sig.clear_onetimekey(&to_str).await;
             }
         }
 
@@ -1264,7 +1272,7 @@ impl BridgeState {
         let signal = self.signal.as_ref()
             .ok_or_else(|| anyhow::anyhow!("Signal not initialized"))?;
         let mappings = signal.get_all_peer_mappings_full().await?;
-        let result: Vec<serde_json::Value> = mappings.into_iter().map(|(nostr_pk, signal_pk, device_id, name, local_pk, _local_sk)| {
+        let result: Vec<serde_json::Value> = mappings.into_iter().map(|(nostr_pk, signal_pk, device_id, name, local_pk, _local_sk, _otk)| {
             let mut v = serde_json::json!({"nostr_pubkey": nostr_pk, "signal_pubkey": signal_pk, "device_id": device_id, "name": name});
             if let Some(lpk) = local_pk {
                 v["local_signal_pubkey"] = serde_json::json!(lpk);
@@ -1584,7 +1592,7 @@ impl BridgeState {
                                 nostr_pubkey: m.0.clone(),
                                 curve25519_pk_hex: m.1.clone(),
                                 device_id: m.2 as u32,
-                                onetimekey: None,
+                                onetimekey: m.6.clone().filter(|s| !s.is_empty()),
                             })
                     } else { None }
                 } else { None };

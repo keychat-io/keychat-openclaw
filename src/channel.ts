@@ -695,7 +695,7 @@ function getPeerSubscribedAddresses(accountId: string): Map<string, string[]> {
 // Minimum addresses to keep per peer after lazy cleanup (matches Keychat app: remainReceiveKeyPerRoom=2).
 // Old addresses are only cleaned up when a message is received on a newer address,
 // confirming the peer has moved on. Never delete proactively (e.g. at startup or after send).
-const REMAIN_RECEIVE_KEYS_PER_PEER = 2;
+const REMAIN_RECEIVE_KEYS_PER_PEER = 3;
 
 // ═══════════════════════════════════════════════════════════════════════════
 // MLS (Large Group) state
@@ -1012,8 +1012,35 @@ export const keychatPlugin: ChannelPlugin<ResolvedKeychatAccount> = {
       const caption = text;
       const messageText = caption ? `${mediaUrl}\n${caption}` : mediaUrl;
 
+      // Check if target is a small group (Signal group — fan-out to each member)
+      const normalizedTo = normalizePubkey(to);
+      const smallGroupMatch = normalizedTo.match(/^group:(.+)$/);
+      if (smallGroupMatch) {
+        const groupId = smallGroupMatch[1];
+        try {
+          const result = await retrySend(() => bridge.sendGroupMessage(groupId, messageText));
+          if (result.member_rotations?.length) {
+            for (const rot of result.member_rotations) {
+              await handleReceivingAddressRotation(bridge, aid, { new_receiving_address: rot.new_receiving_address } as any, rot.member);
+            }
+          }
+          return {
+            channel: "keychat" as const,
+            to: normalizedTo,
+            messageId: result.event_ids?.[0] || `group-media-${Date.now()}`,
+          };
+        } catch (err) {
+          console.warn(`[keychat] sendMedia to small group ${groupId} failed: ${err}`);
+          return {
+            channel: "keychat" as const,
+            to: normalizedTo,
+            messageId: `failed-${Date.now()}`,
+          };
+        }
+      }
+
       // Check if target is an MLS group
-      const mlsGroupMatch = to.match(/^mls-group:(.+)$/);
+      const mlsGroupMatch = normalizedTo.match(/^mls-group:(.+)$/);
       if (mlsGroupMatch) {
         const groupId = mlsGroupMatch[1];
         try {
@@ -1034,7 +1061,6 @@ export const keychatPlugin: ChannelPlugin<ResolvedKeychatAccount> = {
       }
 
       // 1:1 DM
-      const normalizedTo = normalizePubkey(to);
       try {
         const result = await retrySend(() => bridge.sendMessage(normalizedTo, messageText));
         await handleReceivingAddressRotation(bridge, aid, result, normalizedTo);
@@ -1341,6 +1367,24 @@ export const keychatPlugin: ChannelPlugin<ResolvedKeychatAccount> = {
           ctx.log?.info(`[${account.accountId}] Restored ${addrMappings.length} address-to-peer mapping(s) from DB`);
         }
 
+        // Trim per-peer addresses to REMAIN_RECEIVE_KEYS_PER_PEER (keep most recent)
+        let totalTrimmed = 0;
+        for (const [peerPk, peerAddrs] of getPeerSubscribedAddresses(account.accountId).entries()) {
+          if (peerAddrs.length > REMAIN_RECEIVE_KEYS_PER_PEER) {
+            const stale = peerAddrs.slice(0, peerAddrs.length - REMAIN_RECEIVE_KEYS_PER_PEER);
+            const kept = peerAddrs.slice(peerAddrs.length - REMAIN_RECEIVE_KEYS_PER_PEER);
+            getPeerSubscribedAddresses(account.accountId).set(peerPk, kept);
+            for (const old of stale) {
+              getAddressToPeer(account.accountId).delete(old);
+              try { await bridge.deleteAddressMapping(old); } catch { /* */ }
+            }
+            totalTrimmed += stale.length;
+          }
+        }
+        if (totalTrimmed > 0) {
+          ctx.log?.info(`[${account.accountId}] Startup trim: removed ${totalTrimmed} old address(es), keeping ${REMAIN_RECEIVE_KEYS_PER_PEER} per peer`);
+        }
+
         // Restore Protocol Step 1 WAIT_ACCEPT flows from persisted pending hello messages.
         // This lets startup continue waiting for Protocol Step 3 accept-first on A_onetimekey.
         const mappedPeers = new Set(addrMappings.map((m) => m.peer_nostr_pubkey));
@@ -1359,38 +1403,8 @@ export const keychatPlugin: ChannelPlugin<ResolvedKeychatAccount> = {
           ctx.log?.info(`[${account.accountId}] Restored WAIT_ACCEPT for ${restoredWaitAcceptPeers} pending hello peer(s)`);
         }
 
-        // Sync: add any alice_addrs from Signal sessions that are missing from DB.
-        // Only adds — never deletes. Matches Keychat app behavior: keep all addresses,
-        // let old ones naturally become unused.
-        try {
-          const { addresses: allAliceAddrs } = await bridge.getReceivingAddresses();
-          if (allAliceAddrs.length > 0) {
-            const signalToNostr = new Map<string, string>();
-            for (const [nostrPk, info] of getPeerSessions(account.accountId).entries()) {
-              signalToNostr.set(info.signalPubkey, nostrPk);
-            }
-
-            let addedCount = 0;
-            for (const a of allAliceAddrs) {
-              const peerNostr = signalToNostr.get(a.session_address);
-              if (!peerNostr) continue;
-              if (getAddressToPeer(account.accountId).has(a.nostr_pubkey)) continue;
-              // New address — add to memory and DB
-              getAddressToPeer(account.accountId).set(a.nostr_pubkey, peerNostr);
-              const peerList = getPeerSubscribedAddresses(account.accountId).get(peerNostr) ?? [];
-              peerList.push(a.nostr_pubkey);
-              getPeerSubscribedAddresses(account.accountId).set(peerNostr, peerList);
-              try { await bridge.saveAddressMapping(a.nostr_pubkey, peerNostr); } catch { /* */ }
-              addedCount++;
-            }
-            if (addedCount > 0) {
-              ctx.log?.info(`[${account.accountId}] Synced ${addedCount} new address(es) from Signal sessions`);
-            }
-          }
-        } catch (err) {
-          // getReceivingAddresses failed (bridge not ready?) — skip sync, keep DB addresses intact
-          ctx.log?.warn(`[${account.accountId}] Skipped alice_addrs sync (bridge not ready?): ${err}`);
-        }
+        // Address sync from Signal sessions removed — DB is authoritative after
+        // sendGroupMessage/sendMessage address rotation fix.
 
         // Subscribe to all receiving addresses
         const toSubscribe = Array.from(getAddressToPeer(account.accountId).keys());

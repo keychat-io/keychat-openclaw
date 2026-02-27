@@ -19,6 +19,8 @@ export interface KeychatAccountConfig {
   lightningAddress?: string;
   /** Nostr Wallet Connect URI */
   nwcUri?: string;
+  /** Blossom media server URL for encrypted file upload/download */
+  mediaServer?: string;
 }
 
 /** Top-level keychat channel config — supports single-account or multi-account. */
@@ -44,6 +46,8 @@ export interface ResolvedKeychatAccount {
   lightningAddress?: string;
   /** Nostr Wallet Connect URI */
   nwcUri?: string;
+  /** Blossom media server URL */
+  mediaServer?: string;
   config: KeychatAccountConfig;
 }
 
@@ -109,6 +113,7 @@ export function resolveKeychatAccount(opts: {
     relays: acctCfg?.relays ?? DEFAULT_RELAYS,
     lightningAddress: acctCfg?.lightningAddress?.trim() || undefined,
     nwcUri: acctCfg?.nwcUri?.trim() || undefined,
+    mediaServer: acctCfg?.mediaServer?.trim() || undefined,
     config: {
       enabled: acctCfg?.enabled,
       name: acctCfg?.name,
@@ -120,6 +125,7 @@ export function resolveKeychatAccount(opts: {
       allowFrom: acctCfg?.allowFrom,
       lightningAddress: acctCfg?.lightningAddress,
       nwcUri: acctCfg?.nwcUri,
+      mediaServer: acctCfg?.mediaServer,
     },
   };
 }

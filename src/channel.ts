@@ -107,6 +107,33 @@ function readKeychatAllowFromStore(accountId?: string): string[] {
   } catch { return []; }
 }
 
+/** Append a pubkey to the allow-from store file. */
+function appendKeychatAllowFromStore(pubkey: string, accountId?: string): void {
+  const storePath = accountId
+    ? resolveKeychatCredPath("allowFrom", accountId)
+    : resolveKeychatCredPath("allowFrom");
+  try {
+    let store: { version: number; allowFrom: string[] } = { version: 1, allowFrom: [] };
+    if (existsSync(storePath)) {
+      store = JSON.parse(readFileSync(storePath, "utf-8"));
+    }
+    const normalized = normalizePubkey(pubkey);
+    if (!store.allowFrom.includes(normalized)) {
+      store.allowFrom.push(normalized);
+      writeFileSync(storePath, JSON.stringify(store, null, 2) + "\n", "utf-8");
+    }
+  } catch { /* best effort */ }
+}
+
+/** Check if this account has any allowed peers (config + store). */
+function hasAnyAllowedPeers(accountId: string, runtime: ReturnType<typeof getKeychatRuntime>): boolean {
+  const cfg = runtime.config.loadConfig();
+  const account = resolveKeychatAccount({ cfg, accountId });
+  const configEntries = (account.config.allowFrom ?? []).filter((e) => String(e).trim() && String(e).trim() !== "*");
+  const storeEntries = readKeychatAllowFromStore(accountId);
+  return configEntries.length > 0 || storeEntries.length > 0;
+}
+
 /**
  * Resolve DM access decision for an inbound message.
  * Self-contained — does NOT depend on SDK functions (which fail in ESM plugin context).
@@ -1447,7 +1474,14 @@ async function handleFriendRequestInner(
     ctx.log?.info(`[${accountId}] Rejecting friend request from ${msg.from_pubkey} — dmPolicy block`);
     return;
   }
-  const isPairingPending = helloAccess.decision === "pairing";
+  let isPairingPending = helloAccess.decision === "pairing";
+
+  // Auto-approve first peer: if no one is in the allowlist yet, this is likely the owner
+  if (isPairingPending && !hasAnyAllowedPeers(accountId, runtime)) {
+    ctx.log?.info(`[${accountId}] Auto-approving first friend request from ${msg.from_pubkey} (no existing allowed peers)`);
+    appendKeychatAllowFromStore(msg.from_pubkey, accountId);
+    isPairingPending = false;
+  }
 
   // Process hello via bridge — establishes Signal session
   const hello = await bridge.processHello(msg.encrypted_content);

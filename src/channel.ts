@@ -1154,20 +1154,6 @@ export const keychatPlugin: ChannelPlugin<ResolvedKeychatAccount> = {
               nostrPubkey: m.nostr_pubkey,
             });
           }
-        } else {
-          // Fallback to raw sessions if no mappings exist yet (backward compat)
-          const { sessions } = await bridge.getAllSessions();
-          if (sessions.length > 0) {
-            ctx.log?.info(`[${account.accountId}] Restored ${sessions.length} peer session(s) from DB (no mappings yet)`);
-            for (const s of sessions) {
-              getPeerSessions(account.accountId).set(s.signal_pubkey, {
-                signalPubkey: s.signal_pubkey,
-                deviceId: parseInt(s.device_id, 10),
-                name: "",
-                nostrPubkey: s.signal_pubkey,
-              });
-            }
-          }
         }
 
         // Restore address-to-peer mappings from DB and populate peerSubscribedAddresses

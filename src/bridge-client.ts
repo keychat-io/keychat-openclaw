@@ -464,6 +464,9 @@ export class KeychatBridgeClient {
   }
 
   /** Get all receiving addresses from Signal sessions in DB (for resubscription on restart). */
+  async getReceivingAddresses(): Promise<{ addresses: Array<{ session_address: string; seed: string; nostr_pubkey: string }> }> {
+    return (await this.call("get_receiving_addresses", {})) as any;
+  }
 
   /** Get all peer sessions from DB. */
   async getAllSessions(): Promise<{ sessions: Array<{ signal_pubkey: string; device_id: string }> }> {

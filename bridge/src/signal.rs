@@ -585,6 +585,40 @@ impl SignalManager {
         Ok(session.and_then(|s| s.bob_address))
     }
 
+    /// Get all receiving addresses (alice_addresses) from all sessions.
+    /// Returns Vec<(session_address, seed_key, nostr_pubkey)> so caller can map to peer.
+    pub async fn get_all_receiving_addresses(
+        &self,
+        account: &KeychatAccount,
+    ) -> Result<Vec<(String, String, String)>> {
+        // Query directly from DB to get session address + aliceAddresses together
+        let rows: Vec<(String, String)> = signal_store::sqlx::query_as(
+            "SELECT address, aliceAddresses FROM session WHERE aliceAddresses IS NOT NULL AND aliceAddresses != ''"
+        )
+        .fetch_all(self.pool.database())
+        .await?;
+
+        let mut result = Vec::new();
+        for (session_addr, addrs_csv) in &rows {
+            for seed_key in addrs_csv.split(',') {
+                let seed_key = seed_key.trim();
+                if seed_key.is_empty() {
+                    continue;
+                }
+                // seed_key format: "private_hex-public_hex"
+                match generate_seed_from_ratchetkey_pair(seed_key) {
+                    Ok(nostr_pubkey) => {
+                        result.push((session_addr.clone(), seed_key.to_string(), nostr_pubkey));
+                    }
+                    Err(e) => {
+                        log::warn!("Failed to derive address from seed {}: {}", seed_key, e);
+                    }
+                }
+            }
+        }
+        Ok(result)
+    }
+
     /// Get all peer sessions from the DB.
     /// Returns Vec<(signal_pubkey, device_id_str)>
     pub async fn get_all_sessions_info(

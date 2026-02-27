@@ -982,6 +982,12 @@ export const keychatPlugin: ChannelPlugin<ResolvedKeychatAccount> = {
 
       let mediaUrl = incomingMediaUrl ?? "";
 
+      // If mediaUrl is a local file path (not http), treat it as filePath
+      if (mediaUrl && !mediaUrl.startsWith("http://") && !mediaUrl.startsWith("https://")) {
+        filePath = filePath || mediaUrl;
+        mediaUrl = "";
+      }
+
       // If a local file or buffer is provided (but no pre-resolved mediaUrl),
       // encrypt and upload via Blossom, then use the resulting media URL.
       if (!mediaUrl && (filePath || buffer)) {

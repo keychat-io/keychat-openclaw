@@ -149,7 +149,6 @@ impl BridgeState {
             // --- Queries ---
             "has_session" => self.handle_has_session(req.params).await,
             "compute_address" => self.handle_compute_address(req.params).await,
-            "get_receiving_addresses" => self.handle_get_receiving_addresses().await,
             "get_all_sessions" => self.handle_get_all_sessions().await,
             "get_peer_mappings" => self.handle_get_peer_mappings().await,
             "save_peer_mapping" => self.handle_save_peer_mapping(req.params).await,
@@ -1240,20 +1239,6 @@ impl BridgeState {
         Ok(serde_json::json!({"address": address}))
     }
 
-    /// Get all receiving addresses from Signal sessions in DB.
-    /// Returns addresses with their derived Nostr pubkeys for resubscription.
-    async fn handle_get_receiving_addresses(&self) -> Result<serde_json::Value> {
-        let signal = self.signal.as_ref()
-            .ok_or_else(|| anyhow::anyhow!("Signal not initialized"))?;
-        let account = self.account.as_ref()
-            .ok_or_else(|| anyhow::anyhow!("No account initialized"))?;
-        let addresses = signal.get_all_receiving_addresses(account).await?;
-        log::info!("get_receiving_addresses returning {} address(es)", addresses.len());
-        let result: Vec<serde_json::Value> = addresses.into_iter().map(|(session_addr, seed, pubkey)| {
-            serde_json::json!({"session_address": session_addr, "seed": seed, "nostr_pubkey": pubkey})
-        }).collect();
-        Ok(serde_json::json!({"addresses": result}))
-    }
 
     /// Get all peer sessions from DB.
     async fn handle_get_all_sessions(&self) -> Result<serde_json::Value> {

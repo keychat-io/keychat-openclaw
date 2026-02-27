@@ -1367,50 +1367,6 @@ export const keychatPlugin: ChannelPlugin<ResolvedKeychatAccount> = {
           ctx.log?.info(`[${account.accountId}] Restored ${addrMappings.length} address-to-peer mapping(s) from DB`);
         }
 
-        // One-time migration: replace DB address mappings with latest 3 per peer
-        // from Signal sessions. After this runs once, this block can be removed.
-        try {
-          const totalDbAddrs = Array.from(getAddressToPeer(account.accountId).keys()).length;
-          const peerCount = getPeerSessions(account.accountId).size;
-          const needsMigration = peerCount > 0 && (totalDbAddrs === 0 || totalDbAddrs > peerCount * REMAIN_RECEIVE_KEYS_PER_PEER);
-          if (needsMigration) {
-            ctx.log?.info(`[${account.accountId}] Migration: ${totalDbAddrs} addresses for ${peerCount} peers exceeds limit, syncing from Signal sessions...`);
-            const { addresses: aliceAddrs } = await bridge.getReceivingAddresses();
-            ctx.log?.info(`[${account.accountId}] Migration: Rust returned ${aliceAddrs.length} addresses (last ${REMAIN_RECEIVE_KEYS_PER_PEER} per session)`);
-            const signalToNostr = new Map<string, string>();
-            for (const [nostrPk, info] of getPeerSessions(account.accountId).entries()) {
-              signalToNostr.set(info.signalPubkey, nostrPk);
-            }
-            // Group by peer (Rust already returns only last 3 per session)
-            const peerAddrsFromSignal = new Map<string, string[]>();
-            for (const a of aliceAddrs) {
-              const peerNostr = signalToNostr.get(a.session_address);
-              if (!peerNostr) continue;
-              const list = peerAddrsFromSignal.get(peerNostr) ?? [];
-              list.push(a.nostr_pubkey);
-              peerAddrsFromSignal.set(peerNostr, list);
-            }
-            // Clear ALL old address mappings from memory and DB
-            for (const [addr] of getAddressToPeer(account.accountId).entries()) {
-              try { await bridge.deleteAddressMapping(addr); } catch { /* */ }
-            }
-            getAddressToPeer(account.accountId).clear();
-            // Write fresh mappings
-            let addedCount = 0;
-            for (const [peerNostr, addrs] of peerAddrsFromSignal.entries()) {
-              for (const addr of addrs) {
-                getAddressToPeer(account.accountId).set(addr, peerNostr);
-                try { await bridge.saveAddressMapping(addr, peerNostr); } catch { /* */ }
-                addedCount++;
-              }
-              getPeerSubscribedAddresses(account.accountId).set(peerNostr, [...addrs]);
-            }
-            ctx.log?.info(`[${account.accountId}] Migration complete: ${addedCount} addresses for ${peerAddrsFromSignal.size} peers`);
-          }
-        } catch (err) {
-          ctx.log?.warn(`[${account.accountId}] Address migration failed: ${err}`);
-        }
-
         // Restore Protocol Step 1 WAIT_ACCEPT flows from persisted pending hello messages.
         // This lets startup continue waiting for Protocol Step 3 accept-first on A_onetimekey.
         const mappedPeers = new Set(addrMappings.map((m) => m.peer_nostr_pubkey));
@@ -2327,7 +2283,6 @@ async function handleEncryptedDM(
           friendRequestManager.setSessionEstablished(accountId, senderNostrId);
 
           // Step 4: after accept-first decrypt, subscribe to per-peer ratchet addresses from alice_addrs.
-          // Never use getReceivingAddresses() here; that returns all peers and can misroute.
           try {
             const aliceAddrs: string[] = decryptResult?.alice_addrs ?? [];
             const added = await registerPeerReceivingAddresses(bridge, accountId, senderNostrId, aliceAddrs);
@@ -2430,7 +2385,6 @@ async function handleEncryptedDM(
   // - Protocol Step 5/6: set NORMAL_CHAT only when flushing first queued post-handshake send.
 
   // Step 5+: after decrypt, use ONLY alice_addrs from this message (per-peer ratchet addresses).
-  // Do not call getReceivingAddresses() here because it is global across all peers.
   try {
     const aliceAddrs: string[] = (decryptResult as any)?.alice_addrs ?? [];
     const newAddrs = await registerPeerReceivingAddresses(bridge, accountId, peerNostrPubkey, aliceAddrs);

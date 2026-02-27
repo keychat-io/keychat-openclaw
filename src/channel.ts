@@ -2184,29 +2184,8 @@ async function handleEncryptedDM(
     }
   }
 
-  // Last resort: brute-force peer lookup (only for non-PreKey messages)
-  if (!peerNostrPubkey) {
-    ctx.log?.error(
-      `[${accountId}] ⚠️ Address mapping miss for to_address=${msg.to_address} — falling back to brute-force peer lookup.`,
-    );
-    if (getPeerSessions(accountId).size === 1) {
-      peerNostrPubkey = getPeerSessions(accountId).keys().next().value ?? null;
-    } else {
-      for (const [key] of getPeerSessions(accountId)) {
-        peerNostrPubkey = key;
-        break;
-      }
-    }
-    if (peerNostrPubkey && msg.to_address) {
-      getAddressToPeer(accountId).set(msg.to_address, peerNostrPubkey);
-      try {
-        await bridge.saveAddressMapping(msg.to_address, peerNostrPubkey);
-        console.log(`[keychat] inbound: saved to_address ${msg.to_address.slice(0,16)} → ${peerNostrPubkey.slice(0,16)} to DB`);
-      } catch (err) {
-        console.error(`[keychat] inbound: saveAddressMapping FAILED for ${msg.to_address.slice(0,16)} → ${peerNostrPubkey.slice(0,16)}: ${err}`);
-      }
-    }
-  }
+  // No brute-force fallback — if we can't identify the peer, drop the message.
+  // Guessing would risk sending replies to the wrong person (privacy leak).
 
   if (!peerNostrPubkey) {
     ctx.log?.error(
@@ -2224,34 +2203,17 @@ async function handleEncryptedDM(
   // Decrypt using peer's Signal (curve25519) pubkey
   ctx.log?.info(`[${accountId}] Routing decrypt to peer ${peerNostrPubkey} (signal: ${peer.signalPubkey})`);
   let decryptResult;
-  let actualPeer = peer;
+  // peer is now guaranteed correct (no fallback to other peers)
   try {
     decryptResult = await bridge.decryptMessage(peer.signalPubkey, msg.encrypted_content, msg.is_prekey);
   } catch (err) {
+    // Do NOT try other peers — Signal decrypt consumes message keys (irreversible).
+    // Attempting decrypt with wrong peer would corrupt their ratchet state.
     ctx.log?.error(
-      `[${accountId}] ⚠️ Decrypt failed for mapped peer ${peerNostrPubkey} (signal: ${peer.signalPubkey}): ${err}. Trying other peers...`,
+      `[${accountId}] ⚠️ Decrypt failed for peer ${peerNostrPubkey} (signal: ${peer.signalPubkey}), event_id=${msg.event_id}: ${err}. Dropping message. Peer may need to reset Signal session.`,
     );
-    // Fallback: try other peers — this means address→peer mapping was wrong
-    for (const [key, otherPeer] of getPeerSessions(accountId)) {
-      if (key === peerNostrPubkey) continue;
-      try {
-        decryptResult = await bridge.decryptMessage(otherPeer.signalPubkey, msg.encrypted_content, msg.is_prekey);
-        actualPeer = otherPeer;
-        peerNostrPubkey = key;
-        // Fix address mapping
-        if (msg.to_address) getAddressToPeer(accountId).set(msg.to_address, key);
-        ctx.log?.info(`[${accountId}] Decrypt succeeded with peer ${key} — address mapping corrected`);
-        break;
-      } catch { continue; }
-    }
-    if (!decryptResult) {
-      ctx.log?.error(
-        `[${accountId}] ⚠️ All decrypt attempts failed for peer ${peerNostrPubkey} (event_id=${msg.event_id}, created_at=${msg.created_at}). Skipping message.`,
-      );
-      return;
-    }
+    return;
   }
-  const peer_ = actualPeer;
   const { plaintext } = decryptResult;
 
   // After decrypt, use alice_addrs from decrypt result (per-peer ratchet addresses).
@@ -2469,11 +2431,11 @@ async function handleEncryptedDM(
   }
 
   ctx.log?.info(
-    `[${accountId}] Decrypted from ${peer_.name} (${peerNostrPubkey}): ${displayText.slice(0, 50)}...`,
+    `[${accountId}] Decrypted from ${peer.name} (${peerNostrPubkey}): ${displayText.slice(0, 50)}...`,
   );
 
   // Forward to OpenClaw's message pipeline via shared dispatch helper
-  const senderLabel = peer_.name || peerNostrPubkey.slice(0, 12);
+  const senderLabel = peer.name || peerNostrPubkey.slice(0, 12);
 
   if (groupContext) {
     // Route group messages to a group-specific dispatch
@@ -2488,7 +2450,7 @@ async function handleEncryptedDM(
     }
     if (dmAccess.decision === "pairing") {
       ctx.log?.info(`[${accountId}] ⛔ DM from ${peerNostrPubkey} — pending pairing`);
-      const { code, created } = upsertKeychatPairingRequest(peerNostrPubkey, { name: peer_.name }, accountId);
+      const { code, created } = upsertKeychatPairingRequest(peerNostrPubkey, { name: peer.name }, accountId);
       if (created && code) {
         try {
           await retrySend(() => bridge.sendMessage(peerNostrPubkey, buildKeychatPairingReply(code, peerNostrPubkey)));

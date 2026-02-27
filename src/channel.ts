@@ -2046,25 +2046,26 @@ async function handleEncryptedDM(
           } catch { /* DB lookup failed */ }
         }
 
-        // Strategy 3: This is a new peer replying to our hello — decrypt first,
-        // then identify via PrekeyMessageModel.nostr_id or helloSentTo set
+        // Strategy 3: This is a new peer replying to our hello.
+        // Use signed_prekey_id from the PreKey header to deterministically identify
+        // which peer this reply belongs to (mapped when we sent the hello).
         if (!peerNostrPubkey || !getPeerSessions(accountId).has(peerNostrPubkey)) {
-          ctx.log?.info(`[${accountId}] PreKey from unknown signal key ${sigKey} — attempting decrypt to identify sender`);
+          ctx.log?.info(`[${accountId}] PreKey from unknown signal key ${sigKey} — identifying sender via signed_prekey_id`);
 
-          const decryptResult = await bridge.decryptMessage(sigKey, msg.encrypted_content, true);
-          const { plaintext } = decryptResult;
-
-          // Try to extract nostr_id from PrekeyMessageModel
+          // Look up peer by signed_prekey_id (deterministic, no guessing)
           let senderNostrId: string | null = null;
           let senderName = sigKey.slice(0, 12);
-          try {
-            const parsed = JSON.parse(plaintext);
-            if (parsed?.nostrId) {
-              senderNostrId = parsed.nostrId;
-              senderName = parsed.name || senderName;
-              ctx.log?.info(`[${accountId}] PreKey sender identified via PrekeyMessageModel: nostr_id=${senderNostrId}`);
+          if (prekeyInfo.signed_pre_key_id != null) {
+            try {
+              const lookup = await bridge.lookupPeerBySignedPrekeyId(prekeyInfo.signed_pre_key_id);
+              if (lookup.nostr_pubkey) {
+                senderNostrId = lookup.nostr_pubkey;
+                ctx.log?.info(`[${accountId}] PreKey sender identified via signed_prekey_id=${prekeyInfo.signed_pre_key_id} → ${senderNostrId}`);
+              }
+            } catch (e) {
+              ctx.log?.error(`[${accountId}] lookupPeerBySignedPrekeyId failed: ${e}`);
             }
-          } catch { /* not a PrekeyMessageModel */ }
+          }
 
           // Fallback: use peerNostrPubkey from addressToPeer (onetimekey mapping)
           if (!senderNostrId && peerNostrPubkey) {
@@ -2072,27 +2073,22 @@ async function handleEncryptedDM(
             ctx.log?.info(`[${accountId}] PreKey sender identified via onetimekey addressToPeer mapping: ${senderNostrId}`);
           }
 
-          // Fallback: if only one pending hello, assume it's the responder
-          if (!senderNostrId && helloSentTo.size === 1) {
-            senderNostrId = helloSentTo.values().next().value ?? null;
-            ctx.log?.info(`[${accountId}] PreKey sender inferred from single pending hello: ${senderNostrId}`);
-          }
-
-          // Fallback: if there are pending hellos, try to match
-          if (!senderNostrId && helloSentTo.size > 1) {
-            // Multiple pending hellos — can't determine which one. Log warning.
-            ctx.log?.error(
-              `[${accountId}] ⚠️ PreKey from unknown signal key ${sigKey} with ${helloSentTo.size} pending hellos — cannot determine sender. Dropping message.`,
-            );
-            return;
-          }
-
           if (!senderNostrId) {
             ctx.log?.error(
-              `[${accountId}] ⚠️ PreKey from unknown signal key ${sigKey} — no pending hellos and no PrekeyMessageModel. Dropping.`,
+              `[${accountId}] ⚠️ PreKey from unknown signal key ${sigKey} — signed_prekey_id lookup and onetimekey mapping both failed. Dropping.`,
             );
             return;
           }
+
+          // Now decrypt the PreKey message
+          const decryptResult = await bridge.decryptMessage(sigKey, msg.encrypted_content, true);
+          const { plaintext } = decryptResult;
+
+          // Try to extract name from PrekeyMessageModel if available
+          try {
+            const parsed = JSON.parse(plaintext);
+            if (parsed?.name) senderName = parsed.name;
+          } catch { /* not JSON */ }
 
           // Register the peer session
           const newPeer: PeerSession = {

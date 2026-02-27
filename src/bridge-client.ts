@@ -484,8 +484,12 @@ export class KeychatBridgeClient {
   }
 
   /** Parse sender identity key from a PreKey Signal message (before decryption). */
-  async parsePrekeySender(ciphertext: string): Promise<{ is_prekey: boolean; signal_identity_key?: string }> {
+  async parsePrekeySender(ciphertext: string): Promise<{ is_prekey: boolean; signal_identity_key?: string; signed_pre_key_id?: number }> {
     return (await this.call("parse_prekey_sender", { ciphertext })) as any;
+  }
+
+  async lookupPeerBySignedPrekeyId(signedPrekeyId: number): Promise<{ nostr_pubkey: string | null }> {
+    return (await this.call("lookup_peer_by_signed_prekey_id", { signed_prekey_id: signedPrekeyId })) as any;
   }
 
   /** Send a profile update (type 48) to an existing peer. */

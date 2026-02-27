@@ -670,6 +670,9 @@ impl SignalManager {
         let _ = signal_store::sqlx::query(
             "ALTER TABLE peer_mapping ADD COLUMN local_signal_privkey TEXT"
         ).execute(self.pool.database()).await;
+        let _ = signal_store::sqlx::query(
+            "ALTER TABLE peer_mapping ADD COLUMN signed_prekey_id INTEGER"
+        ).execute(self.pool.database()).await;
         Ok(())
     }
 
@@ -720,11 +723,27 @@ impl SignalManager {
         local_signal_pubkey: Option<&str>,
         local_signal_privkey: Option<&str>,
     ) -> Result<()> {
+        self.save_peer_mapping_full_with_spk(
+            nostr_pubkey, signal_pubkey, device_id, name,
+            local_signal_pubkey, local_signal_privkey, None,
+        ).await
+    }
+
+    pub async fn save_peer_mapping_full_with_spk(
+        &self,
+        nostr_pubkey: &str,
+        signal_pubkey: &str,
+        device_id: u32,
+        name: &str,
+        local_signal_pubkey: Option<&str>,
+        local_signal_privkey: Option<&str>,
+        signed_prekey_id: Option<u32>,
+    ) -> Result<()> {
         let now = SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)?
             .as_secs() as i64;
         signal_store::sqlx::query(
-            "INSERT OR REPLACE INTO peer_mapping (nostr_pubkey, signal_pubkey, device_id, name, created_at, local_signal_pubkey, local_signal_privkey) VALUES (?, ?, ?, ?, ?, ?, ?)"
+            "INSERT OR REPLACE INTO peer_mapping (nostr_pubkey, signal_pubkey, device_id, name, created_at, local_signal_pubkey, local_signal_privkey, signed_prekey_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
         )
         .bind(nostr_pubkey)
         .bind(signal_pubkey)
@@ -733,9 +752,24 @@ impl SignalManager {
         .bind(now)
         .bind(local_signal_pubkey)
         .bind(local_signal_privkey)
+        .bind(signed_prekey_id.map(|id| id as i64))
         .execute(self.pool.database())
         .await?;
         Ok(())
+    }
+
+    /// Look up peer nostr pubkey by signed_prekey_id (used to identify PreKey message sender).
+    pub async fn lookup_peer_by_signed_prekey_id(&self, spk_id: u32) -> Result<Option<String>> {
+        let row = signal_store::sqlx::query(
+            "SELECT nostr_pubkey FROM peer_mapping WHERE signed_prekey_id = ? LIMIT 1"
+        )
+        .bind(spk_id as i64)
+        .fetch_optional(self.pool.database())
+        .await?;
+        Ok(row.map(|r| {
+            use signal_store::sqlx::Row;
+            r.get::<String, _>(0)
+        }))
     }
 
     /// Get all peer mappings including local signal keys.

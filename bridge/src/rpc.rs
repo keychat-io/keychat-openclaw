@@ -135,6 +135,7 @@ impl BridgeState {
             "send_message" => self.handle_send_message(req.params).await,
             "decrypt_message" => self.handle_decrypt_message(req.params).await,
             "parse_prekey_sender" => self.handle_parse_prekey_sender(req.params).await,
+            "lookup_peer_by_signed_prekey_id" => self.handle_lookup_peer_by_spk(req.params).await,
 
             // --- Transport ---
             "connect" => self.handle_connect(req.params).await,
@@ -510,15 +511,16 @@ impl BridgeState {
         };
         let hello_message = serde_json::to_string(&keychat_msg)?;
 
-        // Save peer mapping with ephemeral Signal keys
+        // Save peer mapping with ephemeral Signal keys + signed_prekey_id
         // peer's signal key is unknown until they reply — leave empty
-        signal.save_peer_mapping_full(
+        signal.save_peer_mapping_full_with_spk(
             &to_pubkey,
             "",  // peer's signal key unknown until they reply with hello
             1,
             name,
             Some(&eph_pk_hex),   // OUR local ephemeral Signal pubkey
             Some(&eph_sk_hex),   // OUR local ephemeral Signal privkey
+            Some(qr_model.signed_id),  // Our signed prekey ID — used to identify PreKey replies
         ).await?;
 
         log::info!(
@@ -915,6 +917,25 @@ impl BridgeState {
             "is_prekey": true,
             "signal_identity_key": identity_key_hex,
             "signed_pre_key_id": spk_id,
+        }))
+    }
+
+    async fn handle_lookup_peer_by_spk(
+        &mut self,
+        params: serde_json::Value,
+    ) -> Result<serde_json::Value> {
+        let spk_id = params
+            .get("signed_prekey_id")
+            .and_then(|v| v.as_u64())
+            .ok_or_else(|| anyhow::anyhow!("'signed_prekey_id' required"))? as u32;
+
+        let signal = self.signal.as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Signal not initialized"))?;
+
+        let peer = signal.lookup_peer_by_signed_prekey_id(spk_id).await?;
+        log::info!("lookup_peer_by_signed_prekey_id({}): {:?}", spk_id, peer);
+        Ok(serde_json::json!({
+            "nostr_pubkey": peer,
         }))
     }
 

@@ -1574,15 +1574,9 @@ async function handleFriendRequestInner(
 ): Promise<void> {
   ctx.log?.info(`[${accountId}] Friend request (kind:1059) from ${msg.from_pubkey} (created_at=${msg.created_at})`);
 
-  // Skip stale friend requests (relay replays old events on reconnect)
-  const MAX_FRIEND_REQUEST_AGE_SECS = 60; // 1 minute
-  if (msg.created_at) {
-    const ageSecs = Math.floor(Date.now() / 1000) - msg.created_at;
-    if (ageSecs > MAX_FRIEND_REQUEST_AGE_SECS) {
-      ctx.log?.info(`[${accountId}] Ignoring stale friend request from ${msg.from_pubkey} (age=${ageSecs}s > ${MAX_FRIEND_REQUEST_AGE_SECS}s)`);
-      return;
-    }
-  }
+  // No time-based filtering here — the Rust bridge already sets `since` in relay
+  // subscriptions (last_seen - 3min buffer, same as Keychat app), and processed_events
+  // table handles deduplication. Stale events are never delivered to us.
 
   // If we already have a session, re-process the hello to handle re-pairing
   // (e.g. peer deleted us and re-added, or our previous hello reply wasn't received)

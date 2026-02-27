@@ -60,7 +60,8 @@ import { parseMediaUrl, downloadAndDecrypt, encryptAndUpload } from "./media.js"
 import { transcribe, type SttConfig } from "./stt.js";
 import { join } from "node:path";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { homedir } from "node:os";
+import { writeFile as writeFileAsync } from "node:fs/promises";
+import { homedir, tmpdir } from "node:os";
 import { signalDbPath, qrCodePath, WORKSPACE_KEYCHAT_DIR } from "./paths.js";
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -975,12 +976,31 @@ export const keychatPlugin: ChannelPlugin<ResolvedKeychatAccount> = {
         };
       }
     },
-    sendMedia: async ({ to, text, mediaUrl: incomingMediaUrl, accountId }) => {
+    sendMedia: async ({ to, text, mediaUrl: incomingMediaUrl, filePath, buffer, accountId }: any) => {
       const aid = accountId ?? DEFAULT_ACCOUNT_ID;
       const bridge = await waitForBridge(aid);
 
-      // Media URL is resolved by the SDK before reaching the plugin
-      const mediaUrl = incomingMediaUrl ?? "";
+      let mediaUrl = incomingMediaUrl ?? "";
+
+      // If a local file or buffer is provided (but no pre-resolved mediaUrl),
+      // encrypt and upload via Blossom, then use the resulting media URL.
+      if (!mediaUrl && (filePath || buffer)) {
+        let uploadPath = filePath as string | undefined;
+        if (!uploadPath && buffer) {
+          // Save buffer to a temp file for encryptAndUpload
+          uploadPath = join(tmpdir(), `keychat-upload-${Date.now()}`);
+          await writeFileAsync(uploadPath, buffer as Buffer);
+        }
+        if (uploadPath) {
+          const core = getKeychatRuntime();
+          const cfg = core.config.loadConfig();
+          const acct = resolveKeychatAccount({ cfg, accountId: aid });
+          const signEvent = (content: string, tags: string[][]) =>
+            bridge.signBlossomEvent(content, tags);
+          const result = await encryptAndUpload(uploadPath, signEvent, acct.mediaServer);
+          mediaUrl = result.mediaUrl;
+        }
+      }
 
       // Send the media URL as a message (same as Keychat app)
       const caption = text;

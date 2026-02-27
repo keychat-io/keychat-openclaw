@@ -37,6 +37,9 @@ const KeychatAccountSchema = z.object({
 
   /** Nostr Wallet Connect URI (nostr+walletconnect://...) for Lightning wallet access */
   nwcUri: z.string().optional(),
+
+  /** Blossom media server URL for encrypted file upload/download */
+  mediaServer: z.string().optional(),
 });
 
 /** Top-level keychat config: single-account fields + optional multi-account map. */

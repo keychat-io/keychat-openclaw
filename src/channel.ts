@@ -190,7 +190,9 @@ function generatePairingCode(): string {
 
 /** Upsert a pairing request for a Keychat sender. Returns { code, created }. */
 function upsertKeychatPairingRequest(senderId: string, meta?: Record<string, string>, accountId?: string): { code: string; created: boolean } {
-  const pairingPath = resolveKeychatCredPath("pairing", accountId);
+  // Use channel-level pairing path (no accountId in filename) to match OpenClaw CLI's resolvePairingPath.
+  // The accountId is stored inside each request object for multi-account disambiguation.
+  const pairingPath = resolveKeychatCredPath("pairing");
   try {
     let data: { version: number; requests: Array<{ id: string; code: string; createdAt: string; lastSeenAt: string; accountId?: string; meta?: Record<string, string> }> } = { version: 1, requests: [] };
     if (existsSync(pairingPath)) {

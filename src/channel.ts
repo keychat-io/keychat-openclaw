@@ -1371,6 +1371,36 @@ export const keychatPlugin: ChannelPlugin<ResolvedKeychatAccount> = {
         // (see Lazy cleanup below). We cannot trim at startup because DB address
         // mappings have no timestamp — we don't know which are most recent.
 
+        // One-time recovery: sync addresses from Signal sessions to DB.
+        // This restores addresses that were lost by the startup trim bug.
+        // Safe to keep long-term as a fallback — only adds missing addresses.
+        try {
+          const { addresses: allAliceAddrs } = await bridge.getReceivingAddresses();
+          if (allAliceAddrs.length > 0) {
+            const signalToNostr = new Map<string, string>();
+            for (const [nostrPk, info] of getPeerSessions(account.accountId).entries()) {
+              signalToNostr.set(info.signalPubkey, nostrPk);
+            }
+            let addedCount = 0;
+            for (const a of allAliceAddrs) {
+              const peerNostr = signalToNostr.get(a.session_address);
+              if (!peerNostr) continue;
+              if (getAddressToPeer(account.accountId).has(a.nostr_pubkey)) continue;
+              getAddressToPeer(account.accountId).set(a.nostr_pubkey, peerNostr);
+              const peerList = getPeerSubscribedAddresses(account.accountId).get(peerNostr) ?? [];
+              peerList.push(a.nostr_pubkey);
+              getPeerSubscribedAddresses(account.accountId).set(peerNostr, peerList);
+              try { await bridge.saveAddressMapping(a.nostr_pubkey, peerNostr); } catch { /* */ }
+              addedCount++;
+            }
+            if (addedCount > 0) {
+              ctx.log?.info(`[${account.accountId}] Recovery: restored ${addedCount} address(es) from Signal sessions`);
+            }
+          }
+        } catch (err) {
+          ctx.log?.warn(`[${account.accountId}] Recovery sync failed: ${err}`);
+        }
+
         // Restore Protocol Step 1 WAIT_ACCEPT flows from persisted pending hello messages.
         // This lets startup continue waiting for Protocol Step 3 accept-first on A_onetimekey.
         const mappedPeers = new Set(addrMappings.map((m) => m.peer_nostr_pubkey));

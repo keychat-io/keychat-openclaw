@@ -53,7 +53,7 @@ After `openclaw gateway restart`, the agent will send you its **Keychat ID**, **
 🖼️ QR code image
 ```
 
-Open the [Keychat app](https://keychat.io) → tap the link, paste the npub, or scan the QR code to add as contact. If `dmPolicy` is `open` (default after auto-init), the agent accepts immediately.
+Open the [Keychat app](https://keychat.io) → tap the link, paste the npub, or scan the QR code to add as contact. If `dmPolicy` is `open`, the agent accepts immediately. The default policy is `pairing`, which requires owner approval.
 
 **Can't find the public key?** Just ask your agent in chat: "What's your Keychat ID?"
 
@@ -66,15 +66,15 @@ All options go under `channels.keychat` in your OpenClaw config (`~/.openclaw/op
 | `enabled`          | boolean  | `true`                       | Enable/disable the Keychat channel                        |
 | `name`             | string   | —                            | Display name for this account                             |
 | `relays`           | string[] | `["wss://relay.keychat.io"]` | Nostr relay WebSocket URLs                                |
-| `dmPolicy`         | enum     | `"open"`                     | Access policy: `pairing`, `allowlist`, `open`, `disabled` |
+| `dmPolicy`         | enum     | `"pairing"`                     | Access policy: `pairing`, `allowlist`, `open`, `disabled` |
 | `allowFrom`        | string[] | `[]`                         | Allowed sender pubkeys (npub or hex)                      |
 | `lightningAddress` | string   | —                            | Lightning address for receiving payments                  |
 | `nwcUri`           | string   | —                            | Nostr Wallet Connect URI for wallet access                |
 
 ### DM Policies
 
-- **`open`**: Anyone can message the agent (default)
-- **`pairing`**: New contacts require owner approval via OpenClaw
+- **`open`**: Anyone can message the agent
+- **`pairing`**: New contacts require owner approval via OpenClaw (default)
 - **`allowlist`**: Only pubkeys in `allowFrom` can communicate
 - **`disabled`**: No inbound messages accepted
 

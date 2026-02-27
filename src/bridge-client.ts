@@ -722,6 +722,7 @@ export class KeychatBridgeClient {
     total_members: number;
     event_ids: string[];
     errors: string[];
+    member_rotations?: Array<{ member: string; new_receiving_address: string }>;
   }> {
     return (await this.call("send_group_message", {
       group_id: groupId,

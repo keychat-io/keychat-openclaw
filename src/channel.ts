@@ -669,8 +669,7 @@ function scheduleSummaryNotification(ctx: { log?: { info: (...a: any[]) => void;
       }
 
       const { sendSystemEvent } = await import("./notify.js");
-      await sendSystemEvent(lines.join("
-"));
+      await sendSystemEvent(lines.join("\n"));
 
       // Mark all as notified
       for (const c of needsNotify) {
@@ -867,6 +866,12 @@ export const keychatPlugin: ChannelPlugin<ResolvedKeychatAccount> = {
         const groupId = smallGroupMatch[1];
         try {
           const result = await retrySend(() => bridge.sendGroupMessage(groupId, message));
+          // Handle receiving address rotation for each group member
+          if (result.member_rotations?.length) {
+            for (const rot of result.member_rotations) {
+              await handleReceivingAddressRotation(bridge, aid, { new_receiving_address: rot.new_receiving_address } as any, rot.member);
+            }
+          }
           return {
             channel: "keychat" as const,
             to: normalizedTo,

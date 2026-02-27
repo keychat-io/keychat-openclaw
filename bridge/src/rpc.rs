@@ -1576,6 +1576,7 @@ impl BridgeState {
         let mut sent_count = 0;
         let mut event_ids = Vec::new();
         let mut errors = Vec::new();
+        let mut member_rotations: Vec<serde_json::Value> = Vec::new();
 
         for (member_pubkey, _name, _is_admin) in &members {
             if member_pubkey == &my_id_pubkey {
@@ -1617,6 +1618,12 @@ impl BridgeState {
                     if let Some(eid) = result.get("event_id").and_then(|v| v.as_str()) {
                         event_ids.push(eid.to_string());
                     }
+                    if let Some(nra) = result.get("new_receiving_address").and_then(|v| v.as_str()) {
+                        member_rotations.push(serde_json::json!({
+                            "member": member_pubkey,
+                            "new_receiving_address": nra,
+                        }));
+                    }
                     sent_count += 1;
                 }
                 Err(e) => {
@@ -1634,6 +1641,7 @@ impl BridgeState {
             "total_members": members.len() - 1,
             "event_ids": event_ids,
             "errors": errors,
+            "member_rotations": member_rotations,
         }))
     }
 

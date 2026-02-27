@@ -69,11 +69,26 @@ import { signalDbPath, qrCodePath, WORKSPACE_KEYCHAT_DIR } from "./paths.js";
 // with built-in channels (Signal, Telegram, Discord, etc.)
 // ═══════════════════════════════════════════════════════════════════════════
 
-/** Read the allow-from store for a channel (credentials/<channel>-allowFrom.json). */
-function readKeychatAllowFromStore(): string[] {
+/** Resolve the credentials file path for a channel, matching the framework naming convention.
+ *  Without accountId: `keychat-<suffix>.json`
+ *  With accountId:    `keychat-<accountId>-<suffix>.json`
+ */
+function resolveKeychatCredPath(suffix: string, accountId?: string): string {
+  const base = "keychat";
+  const safeAccount = accountId ? String(accountId).trim().toLowerCase().replace(/[\\/:*?"<>|]/g, "_").replace(/\.\./g, "_") : "";
+  const filename = safeAccount ? `${base}-${safeAccount}-${suffix}.json` : `${base}-${suffix}.json`;
+  return join(homedir(), ".openclaw", "credentials", filename);
+}
+
+/** Read the allow-from store for a channel (credentials/keychat[-<accountId>]-allowFrom.json). */
+function readKeychatAllowFromStore(accountId?: string): string[] {
   try {
-    const storePath = join(homedir(), ".openclaw", "credentials", "keychat-allowFrom.json");
-    if (!existsSync(storePath)) return [];
+    // Try account-specific path first, fall back to channel-level path
+    const accountPath = accountId ? resolveKeychatCredPath("allowFrom", accountId) : null;
+    const channelPath = resolveKeychatCredPath("allowFrom");
+    const storePath = (accountPath && existsSync(accountPath)) ? accountPath
+      : existsSync(channelPath) ? channelPath : null;
+    if (!storePath) return [];
     const store = JSON.parse(readFileSync(storePath, "utf-8"));
     return (store.allowFrom ?? []).map((e: string) => String(e).trim()).filter(Boolean);
   } catch { return []; }
@@ -103,7 +118,7 @@ function resolveDmAccess(
 
   // Collect all allowed entries: config + store (pairing approvals)
   const configEntries = (account.config.allowFrom ?? []).map((e) => normalizePubkey(String(e)));
-  const storeEntries = readKeychatAllowFromStore().map((e) => normalizePubkey(e));
+  const storeEntries = readKeychatAllowFromStore(accountId).map((e) => normalizePubkey(e));
   const allAllowed = [...configEntries, ...storeEntries];
 
   // Check wildcard
@@ -134,8 +149,8 @@ function generatePairingCode(): string {
 }
 
 /** Upsert a pairing request for a Keychat sender. Returns { code, created }. */
-function upsertKeychatPairingRequest(senderId: string, meta?: Record<string, string>): { code: string; created: boolean } {
-  const pairingPath = join(homedir(), ".openclaw", "credentials", "keychat-pairing.json");
+function upsertKeychatPairingRequest(senderId: string, meta?: Record<string, string>, accountId?: string): { code: string; created: boolean } {
+  const pairingPath = resolveKeychatCredPath("pairing", accountId);
   try {
     let data: { version: number; requests: Array<{ id: string; code: string; createdAt: string; lastSeenAt: string; meta?: Record<string, string> }> } = { version: 1, requests: [] };
     if (existsSync(pairingPath)) {
@@ -1461,7 +1476,7 @@ async function handleFriendRequestInner(
   // Auto-reply with hello
   let pairingGreeting = "";
   if (isPairingPending) {
-    const { code } = upsertKeychatPairingRequest(msg.from_pubkey, { name: hello.peer_name });
+    const { code } = upsertKeychatPairingRequest(msg.from_pubkey, { name: hello.peer_name }, accountId);
     pairingGreeting = code
       ? `\n\nPairing code: ${code}\nAsk the bot owner to approve with:\n  openclaw pairing approve keychat ${code}`
       : "";
@@ -2103,7 +2118,7 @@ async function handleEncryptedDM(
           }
           if (prekeyAccess.decision === "pairing") {
             ctx.log?.info(`[${accountId}] ⛔ PreKey message from ${senderNostrId} — pending pairing`);
-            const { code, created } = upsertKeychatPairingRequest(senderNostrId, { name: senderName });
+            const { code, created } = upsertKeychatPairingRequest(senderNostrId, { name: senderName }, accountId);
             if (created && code) {
               try {
                 await retrySend(() => bridge.sendMessage(senderNostrId, buildKeychatPairingReply(code, senderNostrId)));
@@ -2426,7 +2441,7 @@ async function handleEncryptedDM(
     }
     if (dmAccess.decision === "pairing") {
       ctx.log?.info(`[${accountId}] ⛔ DM from ${peerNostrPubkey} — pending pairing`);
-      const { code, created } = upsertKeychatPairingRequest(peerNostrPubkey, { name: peer_.name });
+      const { code, created } = upsertKeychatPairingRequest(peerNostrPubkey, { name: peer_.name }, accountId);
       if (created && code) {
         try {
           await retrySend(() => bridge.sendMessage(peerNostrPubkey, buildKeychatPairingReply(code, peerNostrPubkey)));

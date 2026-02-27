@@ -472,7 +472,8 @@ async function flushPendingOutbound(): Promise<void> {
     }
 
     try {
-      await bridge.sendMessage(msg.to, msg.text);
+      const retryResult = await bridge.sendMessage(msg.to, msg.text);
+      await handleReceivingAddressRotation(bridge, msg.accountId ?? DEFAULT_ACCOUNT_ID, retryResult, msg.to);
     } catch {
       msg.retries++;
       if (msg.retries >= MAX_MESSAGE_RETRIES) {
@@ -807,7 +808,8 @@ export const keychatPlugin: ChannelPlugin<ResolvedKeychatAccount> = {
       const aid = getAccountIdForPairingPeer(id) ?? DEFAULT_ACCOUNT_ID;
       try {
         const bridge = await waitForBridge(aid, 10000);
-        await bridge.sendMessage(id, "✅ Pairing approved! You can now chat with this agent.");
+        const approveResult = await bridge.sendMessage(id, "✅ Pairing approved! You can now chat with this agent.");
+        await handleReceivingAddressRotation(bridge, aid, approveResult, id);
       } catch {
         // If specific account bridge fails, don't try others — wrong account = wrong identity
         console.error(`[keychat] notifyApproval: failed to send via account ${aid} to ${id}`);

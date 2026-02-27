@@ -1367,22 +1367,21 @@ export const keychatPlugin: ChannelPlugin<ResolvedKeychatAccount> = {
           ctx.log?.info(`[${account.accountId}] Restored ${addrMappings.length} address-to-peer mapping(s) from DB`);
         }
 
-        // Note: per-peer address cleanup is handled lazily on message receipt
-        // (see Lazy cleanup below). We cannot trim at startup because DB address
-        // mappings have no timestamp — we don't know which are most recent.
-
-        // Sync: replace DB address mappings with the latest 3 per peer from Signal sessions.
-        // Signal session aliceAddresses are ordered (newest last), so Rust returns only the last 3.
-        // This is the authoritative source — DB mappings are rebuilt from it on each startup.
+        // One-time migration: replace DB address mappings with latest 3 per peer
+        // from Signal sessions. After this runs once, this block can be removed.
         try {
-          const { addresses: aliceAddrs } = await bridge.getReceivingAddresses();
-          if (aliceAddrs.length > 0) {
+          const totalDbAddrs = Array.from(getAddressToPeer(account.accountId).keys()).length;
+          const peerCount = getPeerSessions(account.accountId).size;
+          const needsMigration = peerCount > 0 && (totalDbAddrs === 0 || totalDbAddrs > peerCount * REMAIN_RECEIVE_KEYS_PER_PEER);
+          if (needsMigration) {
+            ctx.log?.info(`[${account.accountId}] Migration: ${totalDbAddrs} addresses for ${peerCount} peers exceeds limit, syncing from Signal sessions...`);
+            const { addresses: aliceAddrs } = await bridge.getReceivingAddresses();
+            ctx.log?.info(`[${account.accountId}] Migration: Rust returned ${aliceAddrs.length} addresses (last ${REMAIN_RECEIVE_KEYS_PER_PEER} per session)`);
             const signalToNostr = new Map<string, string>();
             for (const [nostrPk, info] of getPeerSessions(account.accountId).entries()) {
               signalToNostr.set(info.signalPubkey, nostrPk);
             }
-
-            // Group by peer
+            // Group by peer (Rust already returns only last 3 per session)
             const peerAddrsFromSignal = new Map<string, string[]>();
             for (const a of aliceAddrs) {
               const peerNostr = signalToNostr.get(a.session_address);
@@ -1391,38 +1390,25 @@ export const keychatPlugin: ChannelPlugin<ResolvedKeychatAccount> = {
               list.push(a.nostr_pubkey);
               peerAddrsFromSignal.set(peerNostr, list);
             }
-
-            // For each peer: remove old DB mappings, replace with Signal session's latest
+            // Clear ALL old address mappings from memory and DB
+            for (const [addr] of getAddressToPeer(account.accountId).entries()) {
+              try { await bridge.deleteAddressMapping(addr); } catch { /* */ }
+            }
+            getAddressToPeer(account.accountId).clear();
+            // Write fresh mappings
             let addedCount = 0;
-            let removedCount = 0;
-            for (const [peerNostr, signalAddrs] of peerAddrsFromSignal.entries()) {
-              const existingAddrs = getPeerSubscribedAddresses(account.accountId).get(peerNostr) ?? [];
-              // Remove addresses not in Signal's latest set
-              for (const old of existingAddrs) {
-                if (!signalAddrs.includes(old)) {
-                  getAddressToPeer(account.accountId).delete(old);
-                  try { await bridge.deleteAddressMapping(old); } catch { /* */ }
-                  removedCount++;
-                }
+            for (const [peerNostr, addrs] of peerAddrsFromSignal.entries()) {
+              for (const addr of addrs) {
+                getAddressToPeer(account.accountId).set(addr, peerNostr);
+                try { await bridge.saveAddressMapping(addr, peerNostr); } catch { /* */ }
+                addedCount++;
               }
-              // Add addresses from Signal that are missing
-              const newList: string[] = [];
-              for (const addr of signalAddrs) {
-                if (!getAddressToPeer(account.accountId).has(addr)) {
-                  getAddressToPeer(account.accountId).set(addr, peerNostr);
-                  try { await bridge.saveAddressMapping(addr, peerNostr); } catch { /* */ }
-                  addedCount++;
-                }
-                newList.push(addr);
-              }
-              getPeerSubscribedAddresses(account.accountId).set(peerNostr, newList);
+              getPeerSubscribedAddresses(account.accountId).set(peerNostr, [...addrs]);
             }
-            if (addedCount > 0 || removedCount > 0) {
-              ctx.log?.info(`[${account.accountId}] Signal sync: added ${addedCount}, removed ${removedCount} address(es) (${REMAIN_RECEIVE_KEYS_PER_PEER} per peer from Signal sessions)`);
-            }
+            ctx.log?.info(`[${account.accountId}] Migration complete: ${addedCount} addresses for ${peerAddrsFromSignal.size} peers`);
           }
         } catch (err) {
-          ctx.log?.warn(`[${account.accountId}] Signal session sync failed: ${err}`);
+          ctx.log?.warn(`[${account.accountId}] Address migration failed: ${err}`);
         }
 
         // Restore Protocol Step 1 WAIT_ACCEPT flows from persisted pending hello messages.

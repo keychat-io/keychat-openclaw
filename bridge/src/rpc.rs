@@ -1248,6 +1248,7 @@ impl BridgeState {
         let account = self.account.as_ref()
             .ok_or_else(|| anyhow::anyhow!("No account initialized"))?;
         let addresses = signal.get_all_receiving_addresses(account).await?;
+        log::info!("get_receiving_addresses returning {} address(es)", addresses.len());
         let result: Vec<serde_json::Value> = addresses.into_iter().map(|(session_addr, seed, pubkey)| {
             serde_json::json!({"session_address": session_addr, "seed": seed, "nostr_pubkey": pubkey})
         }).collect();

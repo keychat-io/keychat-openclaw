@@ -2306,7 +2306,8 @@ async function handleEncryptedDM(
             const { code, created } = upsertKeychatPairingRequest(senderNostrId, { name: senderName }, accountId);
             if (created && code) {
               try {
-                await retrySend(() => bridge.sendMessage(senderNostrId, buildKeychatPairingReply(code, senderNostrId)));
+                const pairingResult = await retrySend(() => bridge.sendMessage(senderNostrId, buildKeychatPairingReply(code, senderNostrId)));
+                await handleReceivingAddressRotation(bridge, accountId, pairingResult, senderNostrId);
               } catch { /* best effort */ }
             }
             return;
@@ -2583,7 +2584,8 @@ async function handleEncryptedDM(
       const { code, created } = upsertKeychatPairingRequest(peerNostrPubkey, { name: peer.name }, accountId);
       if (created && code) {
         try {
-          await retrySend(() => bridge.sendMessage(peerNostrPubkey, buildKeychatPairingReply(code, peerNostrPubkey)));
+          const pairingResult = await retrySend(() => bridge.sendMessage(peerNostrPubkey, buildKeychatPairingReply(code, peerNostrPubkey)));
+          await handleReceivingAddressRotation(bridge, accountId, pairingResult, peerNostrPubkey);
         } catch { /* best effort */ }
       }
       return;

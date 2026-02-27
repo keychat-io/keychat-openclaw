@@ -136,6 +136,7 @@ impl BridgeState {
             "decrypt_message" => self.handle_decrypt_message(req.params).await,
             "parse_prekey_sender" => self.handle_parse_prekey_sender(req.params).await,
             "lookup_peer_by_signed_prekey_id" => self.handle_lookup_peer_by_spk(req.params).await,
+            "clear_prekey_material" => self.handle_clear_prekey_material(req.params).await,
 
             // --- Transport ---
             "connect" => self.handle_connect(req.params).await,
@@ -937,6 +938,20 @@ impl BridgeState {
         Ok(serde_json::json!({
             "nostr_pubkey": peer,
         }))
+    }
+
+    async fn handle_clear_prekey_material(
+        &mut self,
+        params: serde_json::Value,
+    ) -> Result<serde_json::Value> {
+        let nostr_pubkey = params
+            .get("nostr_pubkey")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| anyhow::anyhow!("'nostr_pubkey' required"))?;
+        let signal = self.signal.as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Signal not initialized"))?;
+        signal.clear_prekey_material(nostr_pubkey).await?;
+        Ok(serde_json::json!({ "ok": true }))
     }
 
     async fn handle_decrypt_message(

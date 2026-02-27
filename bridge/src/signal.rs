@@ -772,6 +772,19 @@ impl SignalManager {
         }))
     }
 
+    /// Clear sensitive PreKey material after session establishment.
+    /// Keeps nostr_pubkey ↔ signal_pubkey mapping for routing.
+    pub async fn clear_prekey_material(&self, nostr_pubkey: &str) -> Result<()> {
+        signal_store::sqlx::query(
+            "UPDATE peer_mapping SET local_signal_pubkey = NULL, local_signal_privkey = NULL, signed_prekey_id = NULL WHERE nostr_pubkey = ?"
+        )
+        .bind(nostr_pubkey)
+        .execute(self.pool.database())
+        .await?;
+        log::info!("Cleared PreKey material for peer {}", &nostr_pubkey[..16.min(nostr_pubkey.len())]);
+        Ok(())
+    }
+
     /// Get all peer mappings including local signal keys.
     /// Returns: Vec<(nostr_pubkey, signal_pubkey, device_id, name, local_signal_pubkey, local_signal_privkey)>
     pub async fn get_all_peer_mappings(&self) -> Result<Vec<(String, String, i64, String)>> {

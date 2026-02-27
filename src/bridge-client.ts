@@ -492,6 +492,10 @@ export class KeychatBridgeClient {
     return (await this.call("lookup_peer_by_signed_prekey_id", { signed_prekey_id: signedPrekeyId })) as any;
   }
 
+  async clearPrekeyMaterial(nostrPubkey: string): Promise<void> {
+    await this.call("clear_prekey_material", { nostr_pubkey: nostrPubkey });
+  }
+
   /** Send a profile update (type 48) to an existing peer. */
   async sendProfile(peerNostrPubkey: string, opts?: { name?: string; avatar?: string; lightning?: string; bio?: string }): Promise<{ sent: boolean; event_id?: string }> {
     return (await this.call("send_profile", {

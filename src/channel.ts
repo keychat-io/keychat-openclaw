@@ -2107,6 +2107,8 @@ async function handleEncryptedDM(
           };
           getPeerSessions(accountId).set(senderNostrId, newPeer);
           await bridge.savePeerMapping(senderNostrId, sigKey, 1, senderName);
+          // Clear sensitive PreKey material now that session is established
+          try { await bridge.clearPrekeyMaterial(senderNostrId); } catch { /* best effort */ }
           ctx.log?.info(`[${accountId}] ✅ Session established with ${senderNostrId} (signal: ${sigKey})`);
 
           // After PreKey decrypt, subscribe to receiving addresses for this new peer.

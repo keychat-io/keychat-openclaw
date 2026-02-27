@@ -1429,19 +1429,28 @@ export const keychatPlugin: ChannelPlugin<ResolvedKeychatAccount> = {
           ctx.log?.error(`[${account.accountId}] Failed to publish MLS KeyPackage: ${err}`);
         }
 
-        // Restore MLS groups and subscribe to their listen keys
+        // Restore MLS groups — listen keys come from DB (address_peer_mapping),
+        // same as Signal ratchet addresses. No need to re-derive from MLS state.
         const { groups: mlsGroups } = await bridge.mlsGetGroups();
         for (const groupId of mlsGroups) {
           try {
-            const { listen_key } = await bridge.mlsGetListenKey(groupId);
-            mlsListenKeyToGroup.set(listen_key, groupId);
-            await bridge.addSubscription([listen_key]);
-            // Persist MLS listen key in address_peer_mapping (peer = "mls:<groupId>")
             const mlsPeerKey = `mls:${groupId}`;
-            getAddressToPeer(account.accountId).set(listen_key, mlsPeerKey);
-            try { await bridge.saveAddressMapping(listen_key, mlsPeerKey); } catch { /* */ }
+            // Find listen key from DB (already loaded in Step 7b)
+            let listenKey: string | undefined;
+            for (const [addr, peer] of getAddressToPeer(account.accountId).entries()) {
+              if (peer === mlsPeerKey) { listenKey = addr; break; }
+            }
+            if (!listenKey) {
+              // First time or DB was cleared — derive from MLS state
+              const { listen_key } = await bridge.mlsGetListenKey(groupId);
+              listenKey = listen_key;
+              getAddressToPeer(account.accountId).set(listenKey, mlsPeerKey);
+              try { await bridge.saveAddressMapping(listenKey, mlsPeerKey); } catch { /* */ }
+            }
+            mlsListenKeyToGroup.set(listenKey, groupId);
+            await bridge.addSubscription([listenKey]);
             const info = await bridge.mlsGetGroupInfo(groupId);
-            ctx.log?.info(`[${account.accountId}] MLS group restored: "${info.name}" (${groupId}), listen key: ${listen_key}`);
+            ctx.log?.info(`[${account.accountId}] MLS group restored: "${info.name}" (${groupId}), listen key: ${listenKey}`);
           } catch (err) {
             ctx.log?.error(`[${account.accountId}] Failed to restore MLS group ${groupId}: ${err}`);
           }

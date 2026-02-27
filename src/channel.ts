@@ -83,14 +83,27 @@ function resolveKeychatCredPath(suffix: string, accountId?: string): string {
 /** Read the allow-from store for a channel (credentials/keychat[-<accountId>]-allowFrom.json). */
 function readKeychatAllowFromStore(accountId?: string): string[] {
   try {
-    // Try account-specific path first, fall back to channel-level path
     const accountPath = accountId ? resolveKeychatCredPath("allowFrom", accountId) : null;
     const channelPath = resolveKeychatCredPath("allowFrom");
-    const storePath = (accountPath && existsSync(accountPath)) ? accountPath
-      : existsSync(channelPath) ? channelPath : null;
-    if (!storePath) return [];
-    const store = JSON.parse(readFileSync(storePath, "utf-8"));
-    return (store.allowFrom ?? []).map((e: string) => String(e).trim()).filter(Boolean);
+
+    if (accountPath && existsSync(accountPath)) {
+      const store = JSON.parse(readFileSync(accountPath, "utf-8"));
+      return (store.allowFrom ?? []).map((e: string) => String(e).trim()).filter(Boolean);
+    }
+
+    // Account-specific file doesn't exist — check channel-level fallback
+    if (existsSync(channelPath)) {
+      const raw = readFileSync(channelPath, "utf-8");
+      const store = JSON.parse(raw);
+      // Migrate: copy channel-level file to account-specific path so framework
+      // and plugin stay in sync after the user upgrades to multi-account config
+      if (accountPath) {
+        try { writeFileSync(accountPath, raw, "utf-8"); } catch { /* best effort */ }
+      }
+      return (store.allowFrom ?? []).map((e: string) => String(e).trim()).filter(Boolean);
+    }
+
+    return [];
   } catch { return []; }
 }
 

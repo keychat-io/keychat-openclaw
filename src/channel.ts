@@ -192,7 +192,7 @@ function generatePairingCode(): string {
 function upsertKeychatPairingRequest(senderId: string, meta?: Record<string, string>, accountId?: string): { code: string; created: boolean } {
   const pairingPath = resolveKeychatCredPath("pairing", accountId);
   try {
-    let data: { version: number; requests: Array<{ id: string; code: string; createdAt: string; lastSeenAt: string; meta?: Record<string, string> }> } = { version: 1, requests: [] };
+    let data: { version: number; requests: Array<{ id: string; code: string; createdAt: string; lastSeenAt: string; accountId?: string; meta?: Record<string, string> }> } = { version: 1, requests: [] };
     if (existsSync(pairingPath)) {
       data = JSON.parse(readFileSync(pairingPath, "utf-8"));
     }
@@ -203,6 +203,7 @@ function upsertKeychatPairingRequest(senderId: string, meta?: Record<string, str
 
     if (existing) {
       existing.lastSeenAt = now;
+      if (accountId) existing.accountId = accountId;
       if (meta) existing.meta = { ...existing.meta, ...meta };
       writeFileSync(pairingPath, JSON.stringify(data, null, 2) + "\n", "utf-8");
       return { code: existing.code, created: false };
@@ -213,7 +214,7 @@ function upsertKeychatPairingRequest(senderId: string, meta?: Record<string, str
     let code = generatePairingCode();
     while (existingCodes.has(code)) code = generatePairingCode();
 
-    data.requests.push({ id: normalizedId, code, createdAt: now, lastSeenAt: now, meta });
+    data.requests.push({ id: normalizedId, code, createdAt: now, lastSeenAt: now, accountId, meta });
 
     // Cap at 50 pending requests
     if (data.requests.length > 50) {
@@ -225,6 +226,31 @@ function upsertKeychatPairingRequest(senderId: string, meta?: Record<string, str
   } catch {
     return { code: "", created: false };
   }
+}
+
+/** Look up the accountId for a pairing request by peer id. */
+function getAccountIdForPairingPeer(peerId: string): string | undefined {
+  const normalizedId = normalizePubkey(peerId);
+  // Check all possible pairing files
+  for (const [aid] of activeBridges) {
+    const pairingPath = resolveKeychatCredPath("pairing", aid);
+    try {
+      if (!existsSync(pairingPath)) continue;
+      const data = JSON.parse(readFileSync(pairingPath, "utf-8"));
+      const req = data.requests?.find((r: { id: string; accountId?: string }) => normalizePubkey(r.id) === normalizedId);
+      if (req?.accountId) return req.accountId;
+    } catch { /* */ }
+  }
+  // Also check default (no accountId) pairing file
+  const defaultPath = resolveKeychatCredPath("pairing");
+  try {
+    if (existsSync(defaultPath)) {
+      const data = JSON.parse(readFileSync(defaultPath, "utf-8"));
+      const req = data.requests?.find((r: { id: string; accountId?: string }) => normalizePubkey(r.id) === normalizedId);
+      if (req?.accountId) return req.accountId;
+    }
+  } catch { /* */ }
+  return undefined;
 }
 
 /** Build the pairing reply message text. */
@@ -582,19 +608,15 @@ export const keychatPlugin: ChannelPlugin<ResolvedKeychatAccount> = {
     idLabel: "keychatPubkey",
     normalizeAllowEntry: (entry) => normalizePubkey(entry),
     notifyApproval: async ({ id }) => {
-      // Try each active bridge — notifyApproval doesn't receive accountId,
-      // so send from whichever bridge has a session with this peer.
-      for (const [, bridge] of activeBridges) {
-        try {
-          await bridge.sendMessage(id, "✅ Pairing approved! You can now chat with this agent.");
-          return; // sent successfully
-        } catch { /* try next bridge */ }
-      }
-      // Fallback: wait for default bridge
+      // Look up which account this peer's pairing request came from
+      const aid = getAccountIdForPairingPeer(id) ?? DEFAULT_ACCOUNT_ID;
       try {
-        const bridge = await waitForBridge(DEFAULT_ACCOUNT_ID, 10000);
+        const bridge = await waitForBridge(aid, 10000);
         await bridge.sendMessage(id, "✅ Pairing approved! You can now chat with this agent.");
-      } catch { /* bridge not ready, skip notification */ }
+      } catch {
+        // If specific account bridge fails, don't try others — wrong account = wrong identity
+        console.error(`[keychat] notifyApproval: failed to send via account ${aid} to ${id}`);
+      }
     },
   },
 

@@ -619,6 +619,70 @@ function markProcessed(bridge: KeychatBridgeClient, accountId: string, eventId: 
 }
 // per-account: peerNostrPubkey → subscribed receiving addresses (oldest..newest)
 const peerSubscribedAddressesByAccount = new Map<string, Map<string, string[]>>();
+
+// ── Summary notification (debounced, fires once after all accounts start) ──
+let _summaryTimer: ReturnType<typeof setTimeout> | null = null;
+const SUMMARY_DEBOUNCE_MS = 3000;
+
+function scheduleSummaryNotification(ctx: { log?: { info: (...a: any[]) => void; warn?: (...a: any[]) => void } }): void {
+  if (_summaryTimer) clearTimeout(_summaryTimer);
+  _summaryTimer = setTimeout(async () => {
+    _summaryTimer = null;
+    try {
+      const { KEYCHAT_DIR } = await import("./paths.js");
+      const { writeFileSync } = await import("node:fs");
+
+      // Check if ANY account still needs notification
+      const contacts = getAllAgentContacts();
+      const needsNotify: typeof contacts = [];
+      for (const c of contacts) {
+        const marker = join(KEYCHAT_DIR, `.notified-${c.accountId}`);
+        if (!existsSync(marker)) needsNotify.push(c);
+      }
+      if (needsNotify.length === 0) return; // all already notified
+
+      // Build summary with all agents (not just new ones — include all for context)
+      const cfg = getKeychatRuntime().config.loadConfig();
+      let lines: string[] = [];
+      if (contacts.length === 1) {
+        const c = contacts[0];
+        const name = resolveDisplayName(cfg, c.accountId);
+        lines.push(
+          `[Keychat Plugin] Agent "${name}" is online and ready.`,
+          `Keychat ID: ${c.npub}`,
+          `Contact link: ${c.contactUrl}`,
+          `Use the keychat_identity tool to get the QR code image.`,
+          `Send the contact info to the user on their active channel so they can add this agent in Keychat app.`,
+        );
+      } else {
+        lines.push(`[Keychat Plugin] ${contacts.length} agents are online and ready:`);
+        lines.push(``);
+        for (const c of contacts) {
+          const name = resolveDisplayName(cfg, c.accountId);
+          lines.push(`• ${name} (account: ${c.accountId})`);
+          lines.push(`  Keychat ID: ${c.npub}`);
+          lines.push(`  Link: ${c.contactUrl}`);
+          lines.push(``);
+        }
+        lines.push(`Use the keychat_identity tool to get QR code images for each agent.`);
+        lines.push(`Send all agent contact info to the user on their active channel so they can add them in Keychat app.`);
+      }
+
+      const { sendSystemEvent } = await import("./notify.js");
+      await sendSystemEvent(lines.join("
+"));
+
+      // Mark all as notified
+      for (const c of needsNotify) {
+        const marker = join(KEYCHAT_DIR, `.notified-${c.accountId}`);
+        writeFileSync(marker, new Date().toISOString());
+      }
+    } catch (err) {
+      ctx.log?.warn?.(`Failed to send summary notification: ${err}`);
+    }
+  }, SUMMARY_DEBOUNCE_MS);
+}
+
 function getPeerSubscribedAddresses(accountId: string): Map<string, string[]> {
   let m = peerSubscribedAddressesByAccount.get(accountId);
   if (!m) {
@@ -1193,25 +1257,9 @@ export const keychatPlugin: ChannelPlugin<ResolvedKeychatAccount> = {
         `═══════════════════════════════════════════════════\n`,
       );
 
-      // Notify agent on first install only (not on every restart)
-      const { KEYCHAT_DIR } = await import("./paths.js");
-      const notifiedMarker = join(KEYCHAT_DIR, `.notified-${account.accountId}`);
-      if (!existsSync(notifiedMarker)) {
-        try {
-          const { sendSystemEvent } = await import("./notify.js");
-          await sendSystemEvent(
-            `[Keychat Plugin] Agent "${displayName}" (account: ${account.accountId}) is online and ready.\n` +
-            `Use the keychat_identity tool to get the agent's Keychat ID, contact link, and QR code.\n` +
-            `Then send the contact info to the user on their active channel using the message tool.\n` +
-            `The user can open the link or scan the QR code in Keychat app to add this agent as a contact.`,
-          );
-          // Mark as notified so we don't repeat on restart
-          const { writeFileSync } = await import("node:fs");
-          writeFileSync(notifiedMarker, new Date().toISOString());
-        } catch {
-          ctx.log?.warn?.(`[${account.accountId}] Failed to send system event notification`);
-        }
-      }
+      // Schedule a debounced summary notification covering all agents.
+      // Only fires on first install (per-account markers prevent repeats on restart).
+      scheduleSummaryNotification(ctx);
 
       ctx.setStatus({
         accountId: account.accountId,

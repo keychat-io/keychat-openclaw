@@ -1367,23 +1367,9 @@ export const keychatPlugin: ChannelPlugin<ResolvedKeychatAccount> = {
           ctx.log?.info(`[${account.accountId}] Restored ${addrMappings.length} address-to-peer mapping(s) from DB`);
         }
 
-        // Trim per-peer addresses to REMAIN_RECEIVE_KEYS_PER_PEER (keep most recent)
-        let totalTrimmed = 0;
-        for (const [peerPk, peerAddrs] of getPeerSubscribedAddresses(account.accountId).entries()) {
-          if (peerAddrs.length > REMAIN_RECEIVE_KEYS_PER_PEER) {
-            const stale = peerAddrs.slice(0, peerAddrs.length - REMAIN_RECEIVE_KEYS_PER_PEER);
-            const kept = peerAddrs.slice(peerAddrs.length - REMAIN_RECEIVE_KEYS_PER_PEER);
-            getPeerSubscribedAddresses(account.accountId).set(peerPk, kept);
-            for (const old of stale) {
-              getAddressToPeer(account.accountId).delete(old);
-              try { await bridge.deleteAddressMapping(old); } catch { /* */ }
-            }
-            totalTrimmed += stale.length;
-          }
-        }
-        if (totalTrimmed > 0) {
-          ctx.log?.info(`[${account.accountId}] Startup trim: removed ${totalTrimmed} old address(es), keeping ${REMAIN_RECEIVE_KEYS_PER_PEER} per peer`);
-        }
+        // Note: per-peer address cleanup is handled lazily on message receipt
+        // (see Lazy cleanup below). We cannot trim at startup because DB address
+        // mappings have no timestamp — we don't know which are most recent.
 
         // Restore Protocol Step 1 WAIT_ACCEPT flows from persisted pending hello messages.
         // This lets startup continue waiting for Protocol Step 3 accept-first on A_onetimekey.

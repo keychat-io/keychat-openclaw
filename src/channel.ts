@@ -1793,7 +1793,12 @@ async function handleNip04Message(
       // Send hello to the group
       try {
         const helloText = `😃 Hi, I am Agent`;
-        await bridge.sendGroupMessage(joinResult.group_id, helloText, { subtype: 14 });
+        const ghResult = await bridge.sendGroupMessage(joinResult.group_id, helloText, { subtype: 14 });
+        if (ghResult.member_rotations?.length) {
+          for (const rot of ghResult.member_rotations) {
+            await handleReceivingAddressRotation(bridge, accountId, { new_receiving_address: rot.new_receiving_address } as any, rot.member);
+          }
+        }
         ctx.log?.info(`[${accountId}] Sent group hello to ${joinResult.group_id}`);
       } catch (err) {
         ctx.log?.error(`[${accountId}] Failed to send group hello: ${err}`);
@@ -2514,7 +2519,12 @@ async function handleEncryptedDM(
         // Send hello to the group
         const helloText = `😃 Hi, I am Agent`;
         try {
-          await bridge.sendGroupMessage(joinResult.group_id, helloText, { subtype: 14 });
+          const ghResult2 = await bridge.sendGroupMessage(joinResult.group_id, helloText, { subtype: 14 });
+          if (ghResult2.member_rotations?.length) {
+            for (const rot of ghResult2.member_rotations) {
+              await handleReceivingAddressRotation(bridge, accountId, { new_receiving_address: rot.new_receiving_address } as any, rot.member);
+            }
+          }
         } catch (err) {
           ctx.log?.error(`[${accountId}] Failed to send group hello: ${err}`);
         }
@@ -2799,7 +2809,13 @@ async function dispatchGroupToAgent(
     if (!merged) return;
     try {
       // Send reply to the GROUP, not individual peer
-      await retrySend(() => bridge.sendGroupMessage(groupId, merged));
+      const groupResult = await retrySend(() => bridge.sendGroupMessage(groupId, merged));
+      // Handle receiving address rotation for each group member
+      if (groupResult.member_rotations?.length) {
+        for (const rot of groupResult.member_rotations) {
+          await handleReceivingAddressRotation(bridge, accountId, { new_receiving_address: rot.new_receiving_address } as any, rot.member);
+        }
+      }
     } catch (err) {
       ctx.log?.error(`[${accountId}] Group reply delivery failed: ${err}`);
     }

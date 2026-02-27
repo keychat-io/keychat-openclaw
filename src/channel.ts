@@ -1436,8 +1436,12 @@ export const keychatPlugin: ChannelPlugin<ResolvedKeychatAccount> = {
             const { listen_key } = await bridge.mlsGetListenKey(groupId);
             mlsListenKeyToGroup.set(listen_key, groupId);
             await bridge.addSubscription([listen_key]);
+            // Persist MLS listen key in address_peer_mapping (peer = "mls:<groupId>")
+            const mlsPeerKey = `mls:${groupId}`;
+            getAddressToPeer(account.accountId).set(listen_key, mlsPeerKey);
+            try { await bridge.saveAddressMapping(listen_key, mlsPeerKey); } catch { /* */ }
             const info = await bridge.mlsGetGroupInfo(groupId);
-            ctx.log?.info(`[${account.accountId}] MLS group restored: "${info.name}" (${groupId}), listen key: ${listen_key.slice(0, 12)}...`);
+            ctx.log?.info(`[${account.accountId}] MLS group restored: "${info.name}" (${groupId}), listen key: ${listen_key}`);
           } catch (err) {
             ctx.log?.error(`[${account.accountId}] Failed to restore MLS group ${groupId}: ${err}`);
           }
@@ -1942,10 +1946,15 @@ async function handleMlsGroupMessage(
         const oldListenKey = msg.to_address;
         if (oldListenKey && oldListenKey !== commitResult.listen_key) {
           mlsListenKeyToGroup.delete(oldListenKey);
+          getAddressToPeer(accountId).delete(oldListenKey);
+          try { await bridge.deleteAddressMapping(oldListenKey); } catch { /* */ }
           try { await bridge.removeSubscription([oldListenKey]); } catch { /* best effort */ }
         }
         mlsListenKeyToGroup.set(commitResult.listen_key, groupId);
         await bridge.addSubscription([commitResult.listen_key]);
+        const mlsPeerKeyCommit = `mls:${groupId}`;
+        getAddressToPeer(accountId).set(commitResult.listen_key, mlsPeerKeyCommit);
+        try { await bridge.saveAddressMapping(commitResult.listen_key, mlsPeerKeyCommit); } catch { /* */ }
 
         // Generate system message based on commit type
         let systemMsg = "";
@@ -2030,6 +2039,9 @@ async function handleMlsWelcome(
     // Subscribe to the group's listen key
     mlsListenKeyToGroup.set(joinResult.listen_key, groupId);
     await bridge.addSubscription([joinResult.listen_key]);
+    const mlsPeerKeyJoin = `mls:${groupId}`;
+    getAddressToPeer(accountId).set(joinResult.listen_key, mlsPeerKeyJoin);
+    try { await bridge.saveAddressMapping(joinResult.listen_key, mlsPeerKeyJoin); } catch { /* */ }
 
     // Get group info
     const info = await bridge.mlsGetGroupInfo(groupId);
@@ -2054,9 +2066,13 @@ async function handleMlsWelcome(
       const { listen_key: newKey } = await bridge.mlsGetListenKey(groupId);
       if (newKey !== joinResult.listen_key) {
         mlsListenKeyToGroup.delete(joinResult.listen_key);
+        getAddressToPeer(accountId).delete(joinResult.listen_key);
+        try { await bridge.deleteAddressMapping(joinResult.listen_key); } catch { /* */ }
         mlsListenKeyToGroup.set(newKey, groupId);
         await bridge.removeSubscription([joinResult.listen_key]);
         await bridge.addSubscription([newKey]);
+        getAddressToPeer(accountId).set(newKey, `mls:${groupId}`);
+        try { await bridge.saveAddressMapping(newKey, `mls:${groupId}`); } catch { /* */ }
         ctx.log?.info(`[${accountId}] MLS listen key rotated after greeting: ${newKey.slice(0, 12)}...`);
       }
     } catch (err) {

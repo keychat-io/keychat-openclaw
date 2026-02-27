@@ -1371,34 +1371,58 @@ export const keychatPlugin: ChannelPlugin<ResolvedKeychatAccount> = {
         // (see Lazy cleanup below). We cannot trim at startup because DB address
         // mappings have no timestamp — we don't know which are most recent.
 
-        // One-time recovery: sync addresses from Signal sessions to DB.
-        // This restores addresses that were lost by the startup trim bug.
-        // Safe to keep long-term as a fallback — only adds missing addresses.
+        // Sync: replace DB address mappings with the latest 3 per peer from Signal sessions.
+        // Signal session aliceAddresses are ordered (newest last), so Rust returns only the last 3.
+        // This is the authoritative source — DB mappings are rebuilt from it on each startup.
         try {
-          const { addresses: allAliceAddrs } = await bridge.getReceivingAddresses();
-          if (allAliceAddrs.length > 0) {
+          const { addresses: aliceAddrs } = await bridge.getReceivingAddresses();
+          if (aliceAddrs.length > 0) {
             const signalToNostr = new Map<string, string>();
             for (const [nostrPk, info] of getPeerSessions(account.accountId).entries()) {
               signalToNostr.set(info.signalPubkey, nostrPk);
             }
-            let addedCount = 0;
-            for (const a of allAliceAddrs) {
+
+            // Group by peer
+            const peerAddrsFromSignal = new Map<string, string[]>();
+            for (const a of aliceAddrs) {
               const peerNostr = signalToNostr.get(a.session_address);
               if (!peerNostr) continue;
-              if (getAddressToPeer(account.accountId).has(a.nostr_pubkey)) continue;
-              getAddressToPeer(account.accountId).set(a.nostr_pubkey, peerNostr);
-              const peerList = getPeerSubscribedAddresses(account.accountId).get(peerNostr) ?? [];
-              peerList.push(a.nostr_pubkey);
-              getPeerSubscribedAddresses(account.accountId).set(peerNostr, peerList);
-              try { await bridge.saveAddressMapping(a.nostr_pubkey, peerNostr); } catch { /* */ }
-              addedCount++;
+              const list = peerAddrsFromSignal.get(peerNostr) ?? [];
+              list.push(a.nostr_pubkey);
+              peerAddrsFromSignal.set(peerNostr, list);
             }
-            if (addedCount > 0) {
-              ctx.log?.info(`[${account.accountId}] Recovery: restored ${addedCount} address(es) from Signal sessions`);
+
+            // For each peer: remove old DB mappings, replace with Signal session's latest
+            let addedCount = 0;
+            let removedCount = 0;
+            for (const [peerNostr, signalAddrs] of peerAddrsFromSignal.entries()) {
+              const existingAddrs = getPeerSubscribedAddresses(account.accountId).get(peerNostr) ?? [];
+              // Remove addresses not in Signal's latest set
+              for (const old of existingAddrs) {
+                if (!signalAddrs.includes(old)) {
+                  getAddressToPeer(account.accountId).delete(old);
+                  try { await bridge.deleteAddressMapping(old); } catch { /* */ }
+                  removedCount++;
+                }
+              }
+              // Add addresses from Signal that are missing
+              const newList: string[] = [];
+              for (const addr of signalAddrs) {
+                if (!getAddressToPeer(account.accountId).has(addr)) {
+                  getAddressToPeer(account.accountId).set(addr, peerNostr);
+                  try { await bridge.saveAddressMapping(addr, peerNostr); } catch { /* */ }
+                  addedCount++;
+                }
+                newList.push(addr);
+              }
+              getPeerSubscribedAddresses(account.accountId).set(peerNostr, newList);
+            }
+            if (addedCount > 0 || removedCount > 0) {
+              ctx.log?.info(`[${account.accountId}] Signal sync: added ${addedCount}, removed ${removedCount} address(es) (${REMAIN_RECEIVE_KEYS_PER_PEER} per peer from Signal sessions)`);
             }
           }
         } catch (err) {
-          ctx.log?.warn(`[${account.accountId}] Recovery sync failed: ${err}`);
+          ctx.log?.warn(`[${account.accountId}] Signal session sync failed: ${err}`);
         }
 
         // Restore Protocol Step 1 WAIT_ACCEPT flows from persisted pending hello messages.

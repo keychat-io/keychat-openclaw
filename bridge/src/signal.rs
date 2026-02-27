@@ -599,12 +599,15 @@ impl SignalManager {
         .await?;
 
         let mut result = Vec::new();
+        const KEEP_PER_SESSION: usize = 3;
         for (session_addr, addrs_csv) in &rows {
-            for seed_key in addrs_csv.split(',') {
-                let seed_key = seed_key.trim();
-                if seed_key.is_empty() {
-                    continue;
-                }
+            let seeds: Vec<&str> = addrs_csv.split(',')
+                .map(|s| s.trim())
+                .filter(|s| !s.is_empty())
+                .collect();
+            // Keep only the last N (most recent) seeds per session
+            let start = seeds.len().saturating_sub(KEEP_PER_SESSION);
+            for seed_key in &seeds[start..] {
                 // seed_key format: "private_hex-public_hex"
                 match generate_seed_from_ratchetkey_pair(seed_key) {
                     Ok(nostr_pubkey) => {

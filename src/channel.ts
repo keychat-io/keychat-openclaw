@@ -1789,11 +1789,23 @@ async function handleFriendRequestInner(
     c: "signal",
     msg: greetingText,
   });
-  const sendResult = await retrySend(() => bridge.sendMessage(hello.peer_nostr_pubkey, helloReplyMsg, {
-    isHelloReply: true,
-    senderName: displayName,
-  }));
-  ctx.log?.info(`[${accountId}] Sent hello reply to ${hello.peer_nostr_pubkey}`);
+  let sendResult: SendMessageResult | undefined;
+  try {
+    sendResult = await retrySend(() => bridge.sendMessage(hello.peer_nostr_pubkey, helloReplyMsg, {
+      isHelloReply: true,
+      senderName: displayName,
+    }));
+    ctx.log?.info(`[${accountId}] Sent hello reply to ${hello.peer_nostr_pubkey}`);
+  } catch (e) {
+    ctx.log?.error(`[${accountId}] Failed to send hello reply to ${hello.peer_nostr_pubkey}: ${e}`);
+    // Continue — B still needs receiving addresses even if accept-first send fails
+  }
+
+  // Handle receiving address rotation after send (per-peer, addresses persisted to DB)
+  // Must run even if send failed so B is reachable for retries from A
+  if (sendResult) {
+    await handleReceivingAddressRotation(bridge, accountId, sendResult, hello.peer_nostr_pubkey);
+  }
 
   // Send profile so peer knows our display name
   try {
@@ -1802,9 +1814,6 @@ async function handleFriendRequestInner(
   } catch (e) {
     ctx.log?.error(`[${accountId}] Failed to send profile to ${hello.peer_nostr_pubkey}: ${e}`);
   }
-
-  // Handle receiving address rotation after send (per-peer, addresses persisted to DB)
-  await handleReceivingAddressRotation(bridge, accountId, sendResult, hello.peer_nostr_pubkey);
 
   // Notify owner about pending friend request
   if (isPairingPending) {
@@ -2366,7 +2375,9 @@ async function handleEncryptedDM(
             nostrPubkey: senderNostrId,
           };
           getPeerSessions(accountId).set(senderNostrId, newPeer);
-          await bridge.savePeerMapping(senderNostrId, sigKey, 1, senderName);
+          // Do NOT call savePeerMapping here — it would overwrite local_signal_pubkey/privkey
+          // saved during send_hello with NULL, breaking session recovery after bridge restart.
+          // The peer_mapping row was already written by send_hello with correct ephemeral keys.
           // Clear sensitive PreKey material now that session is established
           try { await bridge.clearPrekeyMaterial(senderNostrId); } catch { /* best effort */ }
           ctx.log?.info(`[${accountId}] ✅ Session established with peer ${senderNostrId.slice(0,16)}... (signal: ${sigKey.slice(0,16)}...)`);

@@ -439,14 +439,14 @@ export class KeychatBridgeClient {
     isPrekey?: boolean,
     localSignalPubkey?: string,
     nostrPubkey?: string,
-  ): Promise<{ plaintext: string; my_next_addrs?: string[] }> {
+  ): Promise<{ plaintext: string; next_send_addrs?: string[] }> {
     return (await this.call("decrypt_message", {
       from,
       ciphertext,
       is_prekey: isPrekey ?? false,
       ...(localSignalPubkey ? { local_signal_pubkey: localSignalPubkey } : {}),
       ...(nostrPubkey ? { nostr_pubkey: nostrPubkey } : {}),
-    })) as { plaintext: string; my_next_addrs?: string[] };
+    })) as { plaintext: string; next_send_addrs?: string[] };
   }
 
   /** Connect to Nostr relays. */
@@ -530,18 +530,23 @@ export class KeychatBridgeClient {
   }
 
   /** Save an address-to-peer mapping. */
-  async saveAddressMapping(address: string, peerNostrPubkey: string): Promise<{ saved: boolean }> {
+  async saveReceivingAddress(address: string, peerNostrPubkey: string): Promise<{ saved: boolean }> {
     return (await this.call("save_address_mapping", { address, peer_nostr_pubkey: peerNostrPubkey })) as any;
   }
 
   /** Get all address-to-peer mappings. */
-  async getAddressMappings(): Promise<{ mappings: Array<{ address: string; peer_nostr_pubkey: string }> }> {
+  async getReceivingAddresses(): Promise<{ mappings: Array<{ address: string; peer_nostr_pubkey: string }> }> {
     return (await this.call("get_address_mappings", {})) as any;
   }
 
   /** Delete an address-to-peer mapping. */
-  async deleteAddressMapping(address: string): Promise<{ deleted: boolean }> {
+  async deleteReceivingAddress(address: string): Promise<{ deleted: boolean }> {
     return (await this.call("delete_address_mapping", { address })) as any;
+  }
+
+  /** Save my_sending_address for a peer. */
+  async saveMySendingAddress(nostrPubkey: string, address: string): Promise<{ saved: boolean }> {
+    return (await this.call("save_my_sending_address", { nostr_pubkey: nostrPubkey, address })) as any;
   }
 
   /** Persist a message queued while waiting for Protocol Step 3 accept-first. */

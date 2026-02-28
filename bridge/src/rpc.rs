@@ -152,9 +152,10 @@ impl BridgeState {
             "get_all_sessions" => self.handle_get_all_sessions().await,
             "get_peer_mappings" => self.handle_get_peer_mappings().await,
             "save_peer_mapping" => self.handle_save_peer_mapping(req.params).await,
-            "save_address_mapping" => self.handle_save_address_mapping(req.params).await,
-            "get_address_mappings" => self.handle_get_address_mappings().await,
-            "delete_address_mapping" => self.handle_delete_address_mapping(req.params).await,
+            "save_address_mapping" => self.handle_save_receiving_address(req.params).await,
+            "get_address_mappings" => self.handle_get_receiving_addresses().await,
+            "delete_address_mapping" => self.handle_delete_receiving_address(req.params).await,
+            "save_my_sending_address" => self.handle_save_my_sending_address(req.params).await,
 
             // --- Group (small group / sendAll) ---
             "create_group" => self.handle_create_group(req.params).await,
@@ -865,7 +866,7 @@ impl BridgeState {
                     }
                     // Persist to DB atomically — must survive process restart
                     if let Some(ref sig) = self.signal {
-                        if let Err(e) = sig.save_address_mapping(&derived_pubkey, &to_str).await {
+                        if let Err(e) = sig.save_receiving_address(&derived_pubkey, &to_str).await {
                             log::warn!("Failed to persist derived address to DB: {}", e);
                         } else {
                             log::info!("Persisted ratchet address {} for peer {} to DB", &derived_pubkey[..16], &to_str[..16]);
@@ -1088,37 +1089,39 @@ impl BridgeState {
             }
         }
 
-        if let Some(ref addrs) = result.my_next_addrs {
-            response["my_next_addrs"] = serde_json::to_value(addrs)?;
+        if let Some(ref addrs) = result.next_send_addrs {
+            response["next_send_addrs"] = serde_json::to_value(addrs)?;
 
-            // Persist ratchet-derived receiving addresses to DB atomically.
-            // Resolve peer nostr pubkey from params or DB lookup.
+            // next_send_addrs from decrypt are the PEER's receiving addresses (= our sending destination).
+            // Derive the Nostr pubkey and save as my_sending_address in peer_mysendingaddress_mapping.
             let peer_nostr = params.get("nostr_pubkey")
                 .and_then(|v| v.as_str())
                 .filter(|s| !s.is_empty())
                 .map(|s| s.to_string())
                 .or_else(|| {
-                    // Fallback: lookup nostr pubkey from signal pubkey via peer cache
                     self.peers.values()
                         .find(|p| p.curve25519_pk_hex == from_pubkey)
                         .map(|p| p.nostr_pubkey.clone())
                 });
 
             if let (Some(ref sig), Some(ref nostr_pk)) = (self.signal.as_ref(), &peer_nostr) {
+                // Only save the LAST derived address (most recent ratchet state)
+                let mut last_derived: Option<String> = None;
                 for raw_addr in addrs {
                     match signal::generate_seed_from_ratchetkey_pair(raw_addr) {
-                        Ok(derived) => {
-                            if let Err(e) = sig.save_address_mapping(&derived, nostr_pk).await {
-                                log::warn!("Failed to persist decrypt ratchet address: {}", e);
-                            } else {
-                                log::info!("Persisted decrypt ratchet address {} for peer {}", &derived[..16], &nostr_pk[..16]);
-                            }
-                        }
+                        Ok(derived) => { last_derived = Some(derived); }
                         Err(e) => log::warn!("Failed to derive address from ratchet key: {}", e),
                     }
                 }
+                if let Some(derived) = last_derived {
+                    if let Err(e) = sig.save_my_sending_address(nostr_pk, &derived).await {
+                        log::warn!("Failed to persist my_sending_address: {}", e);
+                    } else {
+                        log::info!("Saved my_sending_address {} for peer {}", &derived[..16], &nostr_pk[..16]);
+                    }
+                }
             } else {
-                log::warn!("Cannot persist my_next_addrs: signal={} peer_nostr={:?}", self.signal.is_some(), peer_nostr.as_ref().map(|s| &s[..16.min(s.len())]));
+                log::warn!("Cannot persist next_send_addrs: signal={} peer_nostr={:?}", self.signal.is_some(), peer_nostr.as_ref().map(|s| &s[..16.min(s.len())]));
             }
         }
 
@@ -1157,7 +1160,7 @@ impl BridgeState {
         // Pre-load known receiving addresses from DB so the initial subscription
         // includes them (avoids missing historical kind:4 events).
         let initial_addrs: Vec<String> = match &self.signal {
-            Some(sig) => sig.get_all_address_mappings().await
+            Some(sig) => sig.get_all_receiving_addresses().await
                 .unwrap_or_default()
                 .into_iter()
                 .map(|(addr, _peer)| addr)
@@ -1326,22 +1329,22 @@ impl BridgeState {
     }
 
     /// Save an address-to-peer mapping.
-    async fn handle_save_address_mapping(&self, params: serde_json::Value) -> Result<serde_json::Value> {
+    async fn handle_save_receiving_address(&self, params: serde_json::Value) -> Result<serde_json::Value> {
         let signal = self.signal.as_ref()
             .ok_or_else(|| anyhow::anyhow!("Signal not initialized"))?;
         let address = params.get("address").and_then(|v| v.as_str())
             .ok_or_else(|| anyhow::anyhow!("address required"))?;
         let peer_nostr_pubkey = params.get("peer_nostr_pubkey").and_then(|v| v.as_str())
             .ok_or_else(|| anyhow::anyhow!("peer_nostr_pubkey required"))?;
-        signal.save_address_mapping(address, peer_nostr_pubkey).await?;
+        signal.save_receiving_address(address, peer_nostr_pubkey).await?;
         Ok(serde_json::json!({"saved": true}))
     }
 
     /// Get all address-to-peer mappings.
-    async fn handle_get_address_mappings(&self) -> Result<serde_json::Value> {
+    async fn handle_get_receiving_addresses(&self) -> Result<serde_json::Value> {
         let signal = self.signal.as_ref()
             .ok_or_else(|| anyhow::anyhow!("Signal not initialized"))?;
-        let mappings = signal.get_all_address_mappings().await?;
+        let mappings = signal.get_all_receiving_addresses().await?;
         let result: Vec<serde_json::Value> = mappings.into_iter().map(|(addr, peer)| {
             serde_json::json!({"address": addr, "peer_nostr_pubkey": peer})
         }).collect();
@@ -1349,13 +1352,25 @@ impl BridgeState {
     }
 
     /// Delete an address-to-peer mapping.
-    async fn handle_delete_address_mapping(&self, params: serde_json::Value) -> Result<serde_json::Value> {
+    async fn handle_delete_receiving_address(&self, params: serde_json::Value) -> Result<serde_json::Value> {
         let signal = self.signal.as_ref()
             .ok_or_else(|| anyhow::anyhow!("Signal not initialized"))?;
         let address = params.get("address").and_then(|v| v.as_str())
             .ok_or_else(|| anyhow::anyhow!("address required"))?;
-        signal.delete_address_mapping(address).await?;
+        signal.delete_receiving_address(address).await?;
         Ok(serde_json::json!({"deleted": true}))
+    }
+
+    /// Save my_sending_address for a peer.
+    async fn handle_save_my_sending_address(&self, params: serde_json::Value) -> Result<serde_json::Value> {
+        let signal = self.signal.as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Signal not initialized"))?;
+        let nostr_pubkey = params.get("nostr_pubkey").and_then(|v| v.as_str())
+            .ok_or_else(|| anyhow::anyhow!("nostr_pubkey required"))?;
+        let address = params.get("address").and_then(|v| v.as_str())
+            .ok_or_else(|| anyhow::anyhow!("address required"))?;
+        signal.save_my_sending_address(nostr_pubkey, address).await?;
+        Ok(serde_json::json!({"saved": true}))
     }
 
     /// Mark an event as processed.

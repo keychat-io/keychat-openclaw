@@ -433,7 +433,7 @@ class FriendRequestManager {
     if (helloResult.onetimekey) {
       handshakeAddresses.add(helloResult.onetimekey);
       getAddressToPeer(accountId).set(helloResult.onetimekey, peerPubkey);
-      try { await bridge.saveAddressMapping(helloResult.onetimekey, peerPubkey); } catch { /* best effort */ }
+      try { await bridge.saveReceivingAddress(helloResult.onetimekey, peerPubkey); } catch { /* best effort */ }
     }
     if (handshakeAddresses.size > 0) {
       await bridge.addSubscription(Array.from(handshakeAddresses));
@@ -1395,8 +1395,8 @@ export const keychatPlugin: ChannelPlugin<ResolvedKeychatAccount> = {
 
         // Restore address-to-peer mappings from DB and populate peerSubscribedAddresses
         console.log(`[keychat] [${account.accountId}] Step 7b: getting address mappings...`);
-        const { mappings: addrMappings } = await bridge.getAddressMappings();
-        console.log(`[keychat] [${account.accountId}] Step 7b: getAddressMappings returned ${addrMappings.length} mapping(s)`);
+        const { mappings: addrMappings } = await bridge.getReceivingAddresses();
+        console.log(`[keychat] [${account.accountId}] Step 7b: getReceivingAddresses returned ${addrMappings.length} mapping(s)`);
         if (addrMappings.length > 0) {
           for (const am of addrMappings) {
             getAddressToPeer(account.accountId).set(am.address, am.peer_nostr_pubkey);
@@ -1486,7 +1486,7 @@ export const keychatPlugin: ChannelPlugin<ResolvedKeychatAccount> = {
               const { listen_key } = await bridge.mlsGetListenKey(groupId);
               listenKey = listen_key;
               getAddressToPeer(account.accountId).set(listenKey, mlsPeerKey);
-              try { await bridge.saveAddressMapping(listenKey, mlsPeerKey); } catch { /* */ }
+              try { await bridge.saveReceivingAddress(listenKey, mlsPeerKey); } catch { /* */ }
             }
             mlsListenKeyToGroup.set(listenKey, groupId);
             await bridge.addSubscription([listenKey]);
@@ -1540,7 +1540,7 @@ export const keychatPlugin: ChannelPlugin<ResolvedKeychatAccount> = {
             friendRequestManager.setSessionEstablished(account.accountId, m.nostr_pubkey);
           }
           // Restore address→peer mappings and peerSubscribedAddresses
-          const { mappings: addrMappings } = await bridge.getAddressMappings();
+          const { mappings: addrMappings } = await bridge.getReceivingAddresses();
           getPeerSubscribedAddresses(account.accountId).clear();
           for (const am of addrMappings) {
             getAddressToPeer(account.accountId).set(am.address, am.peer_nostr_pubkey);
@@ -2030,14 +2030,14 @@ async function handleMlsGroupMessage(
         if (oldListenKey && oldListenKey !== commitResult.listen_key) {
           mlsListenKeyToGroup.delete(oldListenKey);
           getAddressToPeer(accountId).delete(oldListenKey);
-          try { await bridge.deleteAddressMapping(oldListenKey); } catch { /* */ }
+          try { await bridge.deleteReceivingAddress(oldListenKey); } catch { /* */ }
           try { await bridge.removeSubscription([oldListenKey]); } catch { /* best effort */ }
         }
         mlsListenKeyToGroup.set(commitResult.listen_key, groupId);
         await bridge.addSubscription([commitResult.listen_key]);
         const mlsPeerKeyCommit = `mls:${groupId}`;
         getAddressToPeer(accountId).set(commitResult.listen_key, mlsPeerKeyCommit);
-        try { await bridge.saveAddressMapping(commitResult.listen_key, mlsPeerKeyCommit); } catch { /* */ }
+        try { await bridge.saveReceivingAddress(commitResult.listen_key, mlsPeerKeyCommit); } catch { /* */ }
 
         // Generate system message based on commit type
         let systemMsg = "";
@@ -2124,7 +2124,7 @@ async function handleMlsWelcome(
     await bridge.addSubscription([joinResult.listen_key]);
     const mlsPeerKeyJoin = `mls:${groupId}`;
     getAddressToPeer(accountId).set(joinResult.listen_key, mlsPeerKeyJoin);
-    try { await bridge.saveAddressMapping(joinResult.listen_key, mlsPeerKeyJoin); } catch { /* */ }
+    try { await bridge.saveReceivingAddress(joinResult.listen_key, mlsPeerKeyJoin); } catch { /* */ }
 
     // Get group info
     const info = await bridge.mlsGetGroupInfo(groupId);
@@ -2150,12 +2150,12 @@ async function handleMlsWelcome(
       if (newKey !== joinResult.listen_key) {
         mlsListenKeyToGroup.delete(joinResult.listen_key);
         getAddressToPeer(accountId).delete(joinResult.listen_key);
-        try { await bridge.deleteAddressMapping(joinResult.listen_key); } catch { /* */ }
+        try { await bridge.deleteReceivingAddress(joinResult.listen_key); } catch { /* */ }
         mlsListenKeyToGroup.set(newKey, groupId);
         await bridge.removeSubscription([joinResult.listen_key]);
         await bridge.addSubscription([newKey]);
         getAddressToPeer(accountId).set(newKey, `mls:${groupId}`);
-        try { await bridge.saveAddressMapping(newKey, `mls:${groupId}`); } catch { /* */ }
+        try { await bridge.saveReceivingAddress(newKey, `mls:${groupId}`); } catch { /* */ }
         ctx.log?.info(`[${accountId}] MLS listen key rotated after greeting: ${newKey.slice(0, 12)}...`);
       }
     } catch (err) {
@@ -2304,7 +2304,7 @@ async function handleEncryptedDM(
     peerNostrPubkey = getAddressToPeer(accountId).get(msg.to_address) ?? null;
     if (!peerNostrPubkey) {
       try {
-        const { mappings: dbMappings } = await bridge.getAddressMappings();
+        const { mappings: dbMappings } = await bridge.getReceivingAddresses();
         const found = dbMappings.find((m) => m.address === msg.to_address);
         if (found) {
           peerNostrPubkey = found.peer_nostr_pubkey;
@@ -2386,15 +2386,8 @@ async function handleEncryptedDM(
           // initiatedByUs was already set to true when we sent the hello (ensureOutgoingHelloAndHandshakeSubscriptions).
           friendRequestManager.setSessionEstablished(accountId, senderNostrId);
 
-          // Step 4: after accept-first decrypt, subscribe to per-peer ratchet addresses from my_next_addrs.
-          try {
-            const myNextAddrs: string[] = decryptResult?.my_next_addrs ?? [];
-            const added = await registerPeerReceivingAddresses(bridge, accountId, senderNostrId, myNextAddrs);
-            if (added > 0) {
-              const total = getPeerSubscribedAddresses(accountId).get(senderNostrId)?.length ?? 0;
-              ctx.log?.info(`[${accountId}] Registered ${added} receiving address(es) for new peer ${senderNostrId.slice(0,16)} (total ${total})`);
-            }
-          } catch { /* best effort */ }
+          // Step 4: next_send_addrs from decrypt are the peer's receiving addresses (our sending destination).
+          // Rust bridge now handles persisting these as my_sending_address. No TS action needed.
 
           // Clear sensitive PreKey material after address rotation is complete
           try { await bridge.clearPrekeyMaterial(senderNostrId); } catch { /* best effort */ }
@@ -2511,19 +2504,8 @@ async function handleEncryptedDM(
   // - Protocol Step 4: setSessionEstablished in accept-first handlers.
   // - Protocol Step 5/6: set NORMAL_CHAT only when flushing first queued post-handshake send.
 
-  // Step 5+: after decrypt, use ONLY my_next_addrs from this message (per-peer ratchet addresses).
-  try {
-    const myNextAddrs: string[] = (decryptResult as any)?.my_next_addrs ?? [];
-    const newAddrs = await registerPeerReceivingAddresses(bridge, accountId, peerNostrPubkey, myNextAddrs);
-    if (newAddrs > 0) {
-      const peerAddrs = getPeerSubscribedAddresses(accountId).get(peerNostrPubkey) ?? [];
-      ctx.log?.info(
-        `[${accountId}] Updated ${newAddrs} receiving address(es) after decrypt (peer: ${peerNostrPubkey.slice(0,16)}, total ${peerAddrs.length})`,
-      );
-    }
-  } catch (err) {
-    ctx.log?.error(`[${accountId}] Failed to update receiving addresses after decrypt: ${err}`);
-  }
+  // Step 5+: next_send_addrs from decrypt are the peer's receiving addresses (our sending destination).
+  // Rust bridge now handles persisting these as my_sending_address. No TS action needed.
 
   // Lazy cleanup: now that we received a message on msg.to_address, remove older
   // addresses for this peer (keep REMAIN_RECEIVE_KEYS_PER_PEER most recent).
@@ -2543,7 +2525,7 @@ async function handleEncryptedDM(
           for (const old of staleAddrs) {
             getAddressToPeer(accountId).delete(old);
             try { await bridge.removeSubscription([old]); } catch { /* */ }
-            try { await bridge.deleteAddressMapping(old); } catch { /* */ }
+            try { await bridge.deleteReceivingAddress(old); } catch { /* */ }
           }
           if (staleAddrs.length > 0) {
             ctx.log?.info(
@@ -3048,7 +3030,7 @@ async function registerPeerReceivingAddresses(
   for (const addr of newAddrs) {
     getAddressToPeer(accountId).set(addr, peerNostrPubkey);
     peerAddrs.push(addr);
-    try { await bridge.saveAddressMapping(addr, peerNostrPubkey); } catch { /* best effort */ }
+    try { await bridge.saveReceivingAddress(addr, peerNostrPubkey); } catch { /* best effort */ }
   }
   getPeerSubscribedAddresses(accountId).set(peerNostrPubkey, peerAddrs);
   return newAddrs.length;
@@ -3225,7 +3207,7 @@ export async function resetPeerSession(
   for (const [addr, peer] of addrMap) {
     if (peer === normalizedPeer) {
       addrMap.delete(addr);
-      try { await bridge.deleteAddressMapping(addr); } catch { /* best effort */ }
+      try { await bridge.deleteReceivingAddress(addr); } catch { /* best effort */ }
     }
   }
 

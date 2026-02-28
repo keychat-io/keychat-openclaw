@@ -200,6 +200,15 @@ impl BridgeState {
             "mls_fetch_key_package" => self.handle_mls_fetch_key_package(req.params).await,
 
             "ping" => Ok(serde_json::json!({"pong": true})),
+            "verify_schnorr" => {
+                let p = &req.params;
+                let pubkey = p.get("pubkey").and_then(|v| v.as_str()).unwrap_or("");
+                let message = p.get("message").and_then(|v| v.as_str()).unwrap_or("");
+                let signature = p.get("signature").and_then(|v| v.as_str()).unwrap_or("");
+                let valid = crate::protocol::KeychatAccount::schnorr_verify(pubkey, message, signature)
+                    .unwrap_or(false);
+                Ok(serde_json::json!({"valid": valid}))
+            }
             "relay_health_check" => self.handle_relay_health_check().await,
 
             _ => anyhow::bail!("Unknown method: {}", req.method),
@@ -1035,16 +1044,14 @@ impl BridgeState {
             {
                 Ok(r) => r,
                 Err(e) => {
-                    log::warn!("Ephemeral store decrypt failed, trying account default store: {}", e);
-                    signal.decrypt(account, &from_pubkey, &ciphertext_bytes, device_id, room_id, is_prekey).await?
+                    log::error!("Ephemeral store decrypt failed for from={}: {}", &from_pubkey[..16.min(from_pubkey.len())], e);
+                    return Err(e);
                 }
             }
         } else if is_prekey {
-            // No local store identified for this PreKey message.
-            // Instead of blindly iterating all ephemeral stores (which risks ratchet pollution),
-            // fall back to the account default store only.
-            log::warn!("PreKey decrypt: no local_signal_pubkey found for from={}, falling back to default store", &from_pubkey[..16.min(from_pubkey.len())]);
-            signal.decrypt(account, &from_pubkey, &ciphertext_bytes, device_id, room_id, is_prekey).await?
+            // No local store identified for this PreKey message — reject to avoid session corruption.
+            log::error!("PreKey decrypt: no local_signal_pubkey found for from={}, rejecting", &from_pubkey[..16.min(from_pubkey.len())]);
+            return Err(anyhow::anyhow!("No ephemeral Signal store found for PreKey message from {}", &from_pubkey[..16.min(from_pubkey.len())]));
         } else {
             signal.decrypt(account, &from_pubkey, &ciphertext_bytes, device_id, room_id, is_prekey).await?
         };

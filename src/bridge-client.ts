@@ -512,6 +512,12 @@ export class KeychatBridgeClient {
     await this.call("clear_prekey_material", { nostr_pubkey: nostrPubkey });
   }
 
+  /** Verify a Schnorr signature (used for PrekeyMessageModel globalSign verification). */
+  async verifySchnorr(pubkey: string, message: string, signature: string): Promise<boolean> {
+    const result = await this.call("verify_schnorr", { pubkey, message, signature }) as { valid: boolean };
+    return result.valid;
+  }
+
   /** Send a profile update (type 48) to an existing peer. */
   async sendProfile(peerNostrPubkey: string, opts?: { name?: string; avatar?: string; lightning?: string; bio?: string }): Promise<{ sent: boolean; event_id?: string }> {
     return (await this.call("send_profile", {

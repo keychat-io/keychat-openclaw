@@ -266,6 +266,26 @@ impl KeychatAccount {
         Ok(hex::encode(sig.as_ref()))
     }
 
+    /// Verify a Schnorr signature against a public key and message.
+    pub fn schnorr_verify(pubkey_hex: &str, message: &str, signature_hex: &str) -> Result<bool> {
+        use nostr::secp256k1::{Secp256k1, Message, XOnlyPublicKey};
+        use nostr::hashes::{sha256, Hash};
+
+        let secp = Secp256k1::verification_only();
+        let pubkey_bytes = hex::decode(pubkey_hex)?;
+        let xonly = XOnlyPublicKey::from_slice(&pubkey_bytes)
+            .map_err(|e| anyhow::anyhow!("Invalid pubkey: {}", e))?;
+
+        let hash = sha256::Hash::hash(message.as_bytes());
+        let msg = Message::from_digest(hash.to_byte_array());
+
+        let sig_bytes = hex::decode(signature_hex)?;
+        let sig = nostr::secp256k1::schnorr::Signature::from_slice(&sig_bytes)
+            .map_err(|e| anyhow::anyhow!("Invalid signature: {}", e))?;
+
+        Ok(secp.verify_schnorr(&sig, &msg, &xonly).is_ok())
+    }
+
     /// Get the globalSign content string: "Keychat-{nostrId}-{signalId}-{time}"
     pub fn get_sign_message(nostr_id: &str, signal_id: &str, time: i64) -> String {
         format!("Keychat-{}-{}-{}", nostr_id, signal_id, time)

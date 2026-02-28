@@ -1807,8 +1807,9 @@ async function handleFriendRequestInner(
     await handleReceivingAddressRotation(bridge, accountId, sendResult, hello.peer_nostr_pubkey);
   }
 
-  // Send profile so peer knows our display name
+  // Send profile so peer knows our display name (after a short delay to avoid ratchet race with accept-first)
   try {
+    await new Promise(resolve => setTimeout(resolve, 500));
     await retrySend(() => bridge.sendProfile(hello.peer_nostr_pubkey, { name: displayName }));
     ctx.log?.info(`[${accountId}] Sent profile to ${hello.peer_nostr_pubkey}`);
   } catch (e) {
@@ -2423,6 +2424,20 @@ async function handleEncryptedDM(
             if (parsed?.nostrId && typeof parsed.nostrId === "string"
                 && parsed?.signalId && typeof parsed.signalId === "string"
                 && typeof parsed.time === "number") {
+              // Verify Schnorr signature (globalSign) if present
+              if (parsed.sig && typeof parsed.sig === "string") {
+                try {
+                  const signMessage = `Keychat-${parsed.nostrId}-${parsed.signalId}-${parsed.time}`;
+                  const valid = await bridge.verifySchnorr(parsed.nostrId, signMessage, parsed.sig);
+                  if (!valid) {
+                    ctx.log?.error(`[${accountId}] ⚠️ PrekeyMessageModel Schnorr signature verification FAILED for ${senderNostrId.slice(0,16)}`);
+                    return; // Drop message with invalid signature
+                  }
+                } catch (e) {
+                  ctx.log?.error(`[${accountId}] Schnorr verify error: ${e}`);
+                  // Continue — don't block on verification failure (best effort)
+                }
+              }
               ctx.log?.info(`[${accountId}] Hello reply from ${senderNostrId.slice(0,16)}... (${displayText.length} chars)`);
               // Only skip if there is no actual message content to display
               if (!displayText || displayText === plaintext) {

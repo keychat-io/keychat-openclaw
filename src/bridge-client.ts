@@ -437,11 +437,15 @@ export class KeychatBridgeClient {
     from: string,
     ciphertext: string,
     isPrekey?: boolean,
+    localSignalPubkey?: string,
+    nostrPubkey?: string,
   ): Promise<{ plaintext: string; my_next_addrs?: string[] }> {
     return (await this.call("decrypt_message", {
       from,
       ciphertext,
       is_prekey: isPrekey ?? false,
+      ...(localSignalPubkey ? { local_signal_pubkey: localSignalPubkey } : {}),
+      ...(nostrPubkey ? { nostr_pubkey: nostrPubkey } : {}),
     })) as { plaintext: string; my_next_addrs?: string[] };
   }
 
@@ -500,7 +504,7 @@ export class KeychatBridgeClient {
     return (await this.call("parse_prekey_sender", { ciphertext })) as any;
   }
 
-  async lookupPeerBySignedPrekeyId(signedPrekeyId: number): Promise<{ nostr_pubkey: string | null }> {
+  async lookupPeerBySignedPrekeyId(signedPrekeyId: number): Promise<{ nostr_pubkey: string | null; local_signal_pubkey?: string | null }> {
     return (await this.call("lookup_peer_by_signed_prekey_id", { signed_prekey_id: signedPrekeyId })) as any;
   }
 

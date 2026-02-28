@@ -935,8 +935,14 @@ impl BridgeState {
 
         let peer = signal.lookup_peer_by_signed_prekey_id(spk_id).await?;
         log::info!("lookup_peer_by_signed_prekey_id({}): {:?}", spk_id, peer);
+        // Also return local_signal_pubkey so caller can pass it directly to decrypt
+        let local_sig_pk = if let Some(ref npub) = peer {
+            signal.get_peer_mapping_by_nostr_pubkey(npub).await
+                .ok().flatten().and_then(|m| m.4).filter(|s| !s.is_empty())
+        } else { None };
         Ok(serde_json::json!({
             "nostr_pubkey": peer,
+            "local_signal_pubkey": local_sig_pk,
         }))
     }
 
@@ -995,15 +1001,28 @@ impl BridgeState {
             &ciphertext_b64,
         )?;
 
-        // Look up local signal key for this peer (to use the correct ephemeral store).
-        // For hello-reply PreKey messages from unknown peers, there may be no remote signal mapping yet;
-        // in that case we later try all known local ephemeral stores as a fallback.
-        let mappings = signal.get_all_peer_mappings_full().await.unwrap_or_default();
-        let local_signal_pubkey: Option<String> = mappings
-            .iter()
-            .find(|m| m.1 == from_pubkey)
-            .and_then(|m| m.4.clone())
-            .filter(|s| !s.is_empty());
+        // Use caller-provided local_signal_pubkey if available (preferred — avoids DB scan).
+        // Otherwise fall back to looking up by peer's nostr_pubkey or signal_pubkey.
+        let caller_local_key = params
+            .get("local_signal_pubkey")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string());
+
+        let local_signal_pubkey: Option<String> = if caller_local_key.is_some() {
+            caller_local_key
+        } else if let Some(nostr_pk) = params.get("nostr_pubkey").and_then(|v| v.as_str()).filter(|s| !s.is_empty()) {
+            // Look up by nostr pubkey (single row query)
+            signal.get_peer_mapping_by_nostr_pubkey(nostr_pk).await
+                .ok().flatten().and_then(|m| m.4).filter(|s| !s.is_empty())
+        } else {
+            // Last resort: scan by signal pubkey
+            let mappings = signal.get_all_peer_mappings_full().await.unwrap_or_default();
+            mappings.iter()
+                .find(|m| m.1 == from_pubkey)
+                .and_then(|m| m.4.clone())
+                .filter(|s| !s.is_empty())
+        };
 
         log::info!("decrypt_message: from={}, is_prekey={}, device_id={}, ciphertext_len={}, local_store={:?}",
             from_pubkey, is_prekey, device_id, ciphertext_bytes.len(),
@@ -1021,38 +1040,11 @@ impl BridgeState {
                 }
             }
         } else if is_prekey {
-            // Unknown prekey sender (common for hello reply): try each saved local ephemeral store.
-            let mut tried = 0usize;
-            let mut local_candidates: Vec<String> = mappings
-                .iter()
-                .filter_map(|m| m.4.clone())
-                .filter(|s| !s.is_empty())
-                .collect();
-            local_candidates.sort();
-            local_candidates.dedup();
-
-            let mut decrypted: Option<crate::signal::DecryptResult> = None;
-            for candidate in &local_candidates {
-                tried += 1;
-                match signal
-                    .decrypt_with_store(account, Some(candidate), &from_pubkey, &ciphertext_bytes, device_id, room_id, true)
-                    .await
-                {
-                    Ok(r) => {
-                        log::info!("PreKey decrypt succeeded with fallback local store {}", &candidate[..16.min(candidate.len())]);
-                        decrypted = Some(r);
-                        break;
-                    }
-                    Err(_) => continue,
-                }
-            }
-
-            if let Some(r) = decrypted {
-                r
-            } else {
-                log::warn!("PreKey decrypt failed with {} fallback local store(s); trying default store", tried);
-                signal.decrypt(account, &from_pubkey, &ciphertext_bytes, device_id, room_id, is_prekey).await?
-            }
+            // No local store identified for this PreKey message.
+            // Instead of blindly iterating all ephemeral stores (which risks ratchet pollution),
+            // fall back to the account default store only.
+            log::warn!("PreKey decrypt: no local_signal_pubkey found for from={}, falling back to default store", &from_pubkey[..16.min(from_pubkey.len())]);
+            signal.decrypt(account, &from_pubkey, &ciphertext_bytes, device_id, room_id, is_prekey).await?
         } else {
             signal.decrypt(account, &from_pubkey, &ciphertext_bytes, device_id, room_id, is_prekey).await?
         };

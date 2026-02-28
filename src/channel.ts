@@ -2319,12 +2319,16 @@ async function handleEncryptedDM(
         if (!peerNostrPubkey || !getPeerSessions(accountId).has(peerNostrPubkey)) {
           let senderNostrId: string | null = null;
           let senderName = sigKey.slice(0, 12);
+          let localSignalPubkey: string | undefined;
           if (prekeyInfo.signed_pre_key_id != null) {
             try {
               const lookup = await bridge.lookupPeerBySignedPrekeyId(prekeyInfo.signed_pre_key_id);
               if (lookup.nostr_pubkey) {
                 senderNostrId = lookup.nostr_pubkey;
                 ctx.log?.info(`[${accountId}] PreKey sender identified via signed_prekey_id=${prekeyInfo.signed_pre_key_id} → ${senderNostrId}`);
+              }
+              if (lookup.local_signal_pubkey) {
+                localSignalPubkey = lookup.local_signal_pubkey;
               }
             } catch (e) {
               ctx.log?.error(`[${accountId}] lookupPeerBySignedPrekeyId failed: ${e}`);
@@ -2345,7 +2349,7 @@ async function handleEncryptedDM(
           }
 
           // Protocol Step 4: Reproduce X3DH and decrypt accept-first PreKey payload.
-          const decryptResult = await bridge.decryptMessage(sigKey, msg.encrypted_content, true);
+          const decryptResult = await bridge.decryptMessage(sigKey, msg.encrypted_content, true, localSignalPubkey, senderNostrId ?? undefined);
           const { plaintext } = decryptResult;
 
           // Try to extract name from PrekeyMessageModel if available

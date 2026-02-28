@@ -1448,7 +1448,7 @@ export const keychatPlugin: ChannelPlugin<ResolvedKeychatAccount> = {
         if (groups.length > 0) {
           ctx.log?.info(`[${account.accountId}] Restored ${groups.length} group(s) from DB`);
           for (const g of groups) {
-            ctx.log?.info(`[${account.accountId}]   Group: "${g.name}" (${g.group_id})`);
+            ctx.log?.info(`[${account.accountId}]   Group: ${g.group_id}`);
           }
         }
       } catch (err) {
@@ -1491,7 +1491,7 @@ export const keychatPlugin: ChannelPlugin<ResolvedKeychatAccount> = {
             mlsListenKeyToGroup.set(listenKey, groupId);
             await bridge.addSubscription([listenKey]);
             const info = await bridge.mlsGetGroupInfo(groupId);
-            ctx.log?.info(`[${account.accountId}] MLS group restored: "${info.name}" (${groupId}), listen key: ${listenKey}`);
+            ctx.log?.info(`[${account.accountId}] MLS group restored: ${groupId}, listen key: ${listenKey}`);
           } catch (err) {
             ctx.log?.error(`[${account.accountId}] Failed to restore MLS group ${groupId}: ${err}`);
           }
@@ -1874,9 +1874,9 @@ async function handleNip04Message(
         } catch { /* ignore */ }
       }
 
-      ctx.log?.info(`[${accountId}] Received group invite via NIP-04: ${roomProfile.name} from ${senderIdPubkey}`);
+      ctx.log?.info(`[${accountId}] Received group invite via NIP-04 from ${senderIdPubkey.slice(0,16)}...`);
       const joinResult = await bridge.joinGroup(roomProfile, senderIdPubkey);
-      ctx.log?.info(`[${accountId}] Joined group '${joinResult.name}' (${joinResult.group_id}), ${joinResult.member_count} members`);
+      ctx.log?.info(`[${accountId}] Joined group ${joinResult.group_id} (${joinResult.member_count} members)`);
 
       // Send hello to the group
       try {
@@ -2118,7 +2118,7 @@ async function handleMlsWelcome(
 
     // Get group info
     const info = await bridge.mlsGetGroupInfo(groupId);
-    ctx.log?.info(`[${accountId}] MLS group "${info.name}": ${info.members.length} members`);
+    ctx.log?.info(`[${accountId}] MLS group ${groupId}: ${info.members.length} members`);
 
     // Send greeting: self_update produces a commit that must be published + committed
     try {
@@ -2130,7 +2130,7 @@ async function handleMlsWelcome(
 
       // Publish the commit to the group's listen key
       await bridge.mlsPublishToGroup(joinResult.listen_key, greetingResult.encrypted_msg);
-      ctx.log?.info(`[${accountId}] Published MLS greeting commit to group "${info.name}"`);
+      ctx.log?.info(`[${accountId}] Published MLS greeting commit to group ${groupId}`);
 
       // Merge pending commit
       await bridge.mlsSelfCommit(groupId);
@@ -2621,9 +2621,9 @@ async function handleEncryptedDM(
         }
 
         // Join the group via bridge
-        ctx.log?.info(`[${accountId}] Received group invite: ${roomProfile.name} from ${senderIdPubkey}`);
+        ctx.log?.info(`[${accountId}] Received group invite from ${senderIdPubkey.slice(0,16)}...`);
         const joinResult = await bridge.joinGroup(roomProfile, senderIdPubkey);
-        ctx.log?.info(`[${accountId}] Joined group '${joinResult.name}' (${joinResult.group_id}), ${joinResult.member_count} members`);
+        ctx.log?.info(`[${accountId}] Joined group ${joinResult.group_id} (${joinResult.member_count} members)`);
 
         // Send hello to the group
         const helloText = `😃 Hi, I am Agent`;

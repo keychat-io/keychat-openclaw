@@ -2403,10 +2403,14 @@ async function handleEncryptedDM(
             } else if (parsed && typeof parsed.msg === "string") {
               displayText = parsed.msg;
             }
-            // If this is a PrekeyMessageModel (hello reply wrapper), don't dispatch to agent
+            // If this is a PrekeyMessageModel (hello reply wrapper), extract the welcome message
             if (parsed?.nostrId && parsed?.signalId) {
               ctx.log?.info(`[${accountId}] Hello reply from ${senderNostrId.slice(0,16)}... (${displayText.length} chars)`);
-              return; // Protocol handshake overhead — don't dispatch
+              // Only skip if there is no actual message content to display
+              if (!displayText || displayText === plaintext) {
+                return; // Truly empty or unparseable hello reply — skip
+              }
+              // Otherwise fall through to dispatch the welcome message
             }
           } catch { /* not JSON — dispatch as regular message */ }
 

@@ -494,16 +494,13 @@ impl MlsManager {
         data: &str,
     ) -> Result<MlsMessageInType> {
         let user = self.get_user(nostr_id)?;
-        let groups = user.mls_user.groups.read()
-            .map_err(|_| anyhow::anyhow!("Failed to acquire read lock"))?;
-        let group = groups.get(group_id)
+        let mut groups = user.mls_user.groups.write()
+            .map_err(|_| anyhow::anyhow!("Failed to acquire write lock"))?;
+        let group = groups.get_mut(group_id)
             .ok_or_else(|| anyhow::anyhow!("No group with id {} known", group_id))?;
 
-        // Clone the MLS group to avoid consuming ratchet keys from the real group state.
-        // Keychat app does the same: `self.decrypt_nip44(group.mls_group.clone(), data)`
-        let group_clone = group.mls_group.clone();
         let (decrypted_content, _) =
-            decrypt_nip44_with_group(&user.mls_user, &group_clone, data)?;
+            decrypt_nip44_with_group(&user.mls_user, &group.mls_group, data)?;
         let queued_msg = MlsMessageIn::tls_deserialize_exact(&decrypted_content)?;
 
         match queued_msg.extract() {

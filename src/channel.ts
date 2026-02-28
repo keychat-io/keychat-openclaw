@@ -1178,6 +1178,7 @@ export const keychatPlugin: ChannelPlugin<ResolvedKeychatAccount> = {
 
   gateway: {
     startAccount: async (ctx) => {
+     try {
       const runtime = getKeychatRuntime();
       const account = ctx.account;
 
@@ -1892,10 +1893,21 @@ async function handleMlsGroupMessage(
     switch (msgType) {
       case "Application": {
         // Decrypt the application message
-        const decrypted = await bridge.mlsDecryptMessage(groupId, msg.encrypted_content);
+        let decrypted: { plaintext: string; sender: string };
+        try {
+          decrypted = await bridge.mlsDecryptMessage(groupId, msg.encrypted_content);
+        } catch (decryptErr: any) {
+          // OpenMLS throws "Cannot decrypt own messages" for our own messages
+          // (sender key is deleted after sending for forward secrecy).
+          // This is expected — just skip silently.
+          if (decryptErr?.message?.includes("Cannot decrypt own")) {
+            return;
+          }
+          throw decryptErr;
+        }
         ctx.log?.info(`[${accountId}] MLS message from ${decrypted.sender.slice(0, 12)} in group ${groupId}`);
 
-        // Skip messages from ourselves
+        // Skip messages from ourselves (fallback check)
         const myPubkey = accountInfoCache.get(accountId)?.pubkey_hex;
         if (decrypted.sender === myPubkey) {
           ctx.log?.info(`[${accountId}] Skipping own MLS message`);

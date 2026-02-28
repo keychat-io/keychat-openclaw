@@ -1810,7 +1810,7 @@ async function handleFriendRequestInner(
     const ownerPubkey = getOwnerPubkey(accountId, runtime);
     if (ownerPubkey && ownerPubkey !== msg.from_pubkey) {
       const peerPrefix = msg.from_pubkey.slice(0, 8);
-      const notifyText = `🔔 ${hello.peer_name || "Unknown"} (${peerPrefix}) wants to add your agent as a friend. Reply "同意 ${hello.peer_name || peerPrefix}" to approve or "拒绝 ${hello.peer_name || peerPrefix}" to reject.`;
+      const notifyText = `🔔 ${hello.peer_name || "Unknown"} (${peerPrefix}) wants to add your agent as a friend. Do you agree?`;
       const notifyMsg = JSON.stringify({ type: 100, c: "signal", msg: notifyText });
       try {
         await retrySend(() => bridge.sendMessage(ownerPubkey, notifyMsg));

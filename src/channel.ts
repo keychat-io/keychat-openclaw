@@ -1746,7 +1746,7 @@ async function handleFriendRequestInner(
   }
 
   ctx.log?.info(
-    `[${accountId}] Session established with ${hello.peer_name} (nostr: ${hello.peer_nostr_pubkey}, signal: ${hello.peer_signal_pubkey})`,
+    `[${accountId}] Session established with peer ${hello.peer_nostr_pubkey.slice(0,16)}... (signal: ${hello.peer_signal_pubkey.slice(0,16)}...)`,
   );
 
   // Store/update peer session info for this specific nostr pubkey only
@@ -1852,7 +1852,7 @@ async function handleNip04Message(
   runtime: ReturnType<typeof getKeychatRuntime>,
 ): Promise<void> {
   const plaintext = msg.text || msg.encrypted_content;
-  ctx.log?.info(`[${accountId}] NIP-04 decrypted message from ${msg.from_pubkey}: ${plaintext.slice(0, 80)}...`);
+  ctx.log?.info(`[${accountId}] NIP-04 decrypted message from ${msg.from_pubkey?.slice(0,16)}... (${plaintext.length} chars)`);
 
   // Try to parse as KeychatMessage
   let displayText = plaintext;
@@ -2365,7 +2365,7 @@ async function handleEncryptedDM(
           await bridge.savePeerMapping(senderNostrId, sigKey, 1, senderName);
           // Clear sensitive PreKey material now that session is established
           try { await bridge.clearPrekeyMaterial(senderNostrId); } catch { /* best effort */ }
-          ctx.log?.info(`[${accountId}] ✅ Session established with ${senderNostrId} (signal: ${sigKey})`);
+          ctx.log?.info(`[${accountId}] ✅ Session established with peer ${senderNostrId.slice(0,16)}... (signal: ${sigKey.slice(0,16)}...)`);
 
           // A-role: Protocol Step 4 — received accept-first, reproduced X3DH, session established.
           // initiatedByUs was already set to true when we sent the hello (ensureOutgoingHelloAndHandshakeSubscriptions).
@@ -2405,7 +2405,7 @@ async function handleEncryptedDM(
             }
             // If this is a PrekeyMessageModel (hello reply wrapper), don't dispatch to agent
             if (parsed?.nostrId && parsed?.signalId) {
-              ctx.log?.info(`[${accountId}] Hello reply from ${senderNostrId}: ${displayText.slice(0, 80)}`);
+              ctx.log?.info(`[${accountId}] Hello reply from ${senderNostrId.slice(0,16)}... (${displayText.length} chars)`);
               return; // Protocol handshake overhead — don't dispatch
             }
           } catch { /* not JSON — dispatch as regular message */ }

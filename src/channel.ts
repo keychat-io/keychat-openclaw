@@ -59,6 +59,7 @@ import { storeMnemonic, retrieveMnemonic } from "./keychain.js";
 import { parseMediaUrl, downloadAndDecrypt, encryptAndUpload } from "./media.js";
 import { transcribe, type SttConfig } from "./stt.js";
 import { join } from "node:path";
+import { ensureBinary } from "./ensure-binary.js";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { writeFile as writeFileAsync } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
@@ -1182,6 +1183,7 @@ export const keychatPlugin: ChannelPlugin<ResolvedKeychatAccount> = {
       const account = ctx.account;
 
       ctx.log?.info(`[${account.accountId}] Starting Keychat channel...`);
+      ctx.log?.info(`[${account.accountId}] DEBUG account keys: ${Object.keys(account).join(',')}, relays type: ${typeof account.relays}, relays: ${Array.isArray(account.relays) ? account.relays.length : 'not-array'}`);
 
       // Clean up any existing bridge from a previous start
       const oldBridge = activeBridges.get(account.accountId);
@@ -1197,9 +1199,11 @@ export const keychatPlugin: ChannelPlugin<ResolvedKeychatAccount> = {
       }
 
       // 1. Start the Rust bridge sidecar (auto-download binary if missing)
-      const { ensureBinary } = await import("./ensure-binary.js");
+      ctx.log?.info(`[${account.accountId}] DEBUG: step 1a ensureBinary...`);
       await ensureBinary();
+      ctx.log?.info(`[${account.accountId}] DEBUG: step 1b new KeychatBridgeClient...`);
       const bridge = new KeychatBridgeClient();
+      ctx.log?.info(`[${account.accountId}] DEBUG: step 1c bridge.start()...`);
       await bridge.start();
       ctx.log?.info(`[${account.accountId}] Bridge sidecar started`);
 

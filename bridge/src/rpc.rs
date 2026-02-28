@@ -863,6 +863,14 @@ impl BridgeState {
                             log::warn!("Failed to subscribe to derived address: {}", e);
                         }
                     }
+                    // Persist to DB atomically — must survive process restart
+                    if let Some(ref sig) = self.signal {
+                        if let Err(e) = sig.save_address_mapping(&derived_pubkey, &to_str).await {
+                            log::warn!("Failed to persist derived address to DB: {}", e);
+                        } else {
+                            log::info!("Persisted ratchet address {} for peer {} to DB", &derived_pubkey[..16], &to_str[..16]);
+                        }
+                    }
                     derived_receiving_address = Some(derived_pubkey);
                 }
                 Err(e) => {
@@ -1080,8 +1088,38 @@ impl BridgeState {
             }
         }
 
-        if let Some(addrs) = result.my_next_addrs {
+        if let Some(ref addrs) = result.my_next_addrs {
             response["my_next_addrs"] = serde_json::to_value(addrs)?;
+
+            // Persist ratchet-derived receiving addresses to DB atomically.
+            // Resolve peer nostr pubkey from params or DB lookup.
+            let peer_nostr = params.get("nostr_pubkey")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_string())
+                .or_else(|| {
+                    // Fallback: lookup nostr pubkey from signal pubkey via peer cache
+                    self.peers.values()
+                        .find(|p| p.curve25519_pk_hex == from_pubkey)
+                        .map(|p| p.nostr_pubkey.clone())
+                });
+
+            if let (Some(ref sig), Some(ref nostr_pk)) = (self.signal.as_ref(), &peer_nostr) {
+                for raw_addr in addrs {
+                    match signal::generate_seed_from_ratchetkey_pair(raw_addr) {
+                        Ok(derived) => {
+                            if let Err(e) = sig.save_address_mapping(&derived, nostr_pk).await {
+                                log::warn!("Failed to persist decrypt ratchet address: {}", e);
+                            } else {
+                                log::info!("Persisted decrypt ratchet address {} for peer {}", &derived[..16], &nostr_pk[..16]);
+                            }
+                        }
+                        Err(e) => log::warn!("Failed to derive address from ratchet key: {}", e),
+                    }
+                }
+            } else {
+                log::warn!("Cannot persist my_next_addrs: signal={} peer_nostr={:?}", self.signal.is_some(), peer_nostr.as_ref().map(|s| &s[..16.min(s.len())]));
+            }
         }
 
         Ok(response)

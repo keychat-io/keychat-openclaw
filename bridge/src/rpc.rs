@@ -673,41 +673,23 @@ impl BridgeState {
         let mut local_signal_pubkey: Option<String> = None;
 
         // Fallback: if peer not in memory, try to load from DB peer_mapping
-        if peer.is_none() {
-            if let Some(signal) = self.signal.as_ref() {
-                if let Ok(mappings) = signal.get_all_peer_mappings_full().await {
-                    for m in mappings {
-                        if m.0 == to_str {
-                            if m.1.is_empty() {
-                                // Placeholder mapping (hello sent, no reply yet)
-                                log::info!("Peer {} has placeholder mapping (no signal pubkey yet), waiting for hello reply", to_str);
-                                local_signal_pubkey = m.4.filter(|s| !s.is_empty());
-                                break;
-                            }
-                            log::info!("Loaded peer {} from DB peer_mapping (signal: {}, local_signal: {:?})", to_str, m.1, m.4);
-                            let restored_peer = PeerSession {
-                                nostr_pubkey: m.0.clone(),
-                                curve25519_pk_hex: m.1.clone(),
-                                device_id: m.2 as u32,
-                                onetimekey: m.6.clone().filter(|s| !s.is_empty()),
-                            };
-                            self.peers.insert(to_str.clone(), restored_peer.clone());
-                            peer = Some(restored_peer);
-                            local_signal_pubkey = m.4.filter(|s| !s.is_empty());
-                            break;
-                        }
-                    }
-                }
-            }
-        } else {
-            // Also look up local signal key from DB for known peers
-            if let Some(signal) = self.signal.as_ref() {
-                if let Ok(mappings) = signal.get_all_peer_mappings_full().await {
-                    for m in mappings {
-                        if m.0 == to_str {
-                            local_signal_pubkey = m.4.filter(|s| !s.is_empty());
-                            break;
-                        }
+        if let Some(signal) = self.signal.as_ref() {
+            if let Ok(Some(m)) = signal.get_peer_mapping_by_nostr_pubkey(&to_str).await {
+                local_signal_pubkey = m.4.filter(|s| !s.is_empty());
+                if peer.is_none() {
+                    if m.1.is_empty() {
+                        // Placeholder mapping (hello sent, no reply yet)
+                        log::info!("Peer {} has placeholder mapping (no signal pubkey yet), waiting for hello reply", to_str);
+                    } else {
+                        log::info!("Loaded peer {} from DB peer_mapping (signal: {}, local_signal: {:?})", to_str, &m.1[..16.min(m.1.len())], &local_signal_pubkey);
+                        let restored_peer = PeerSession {
+                            nostr_pubkey: m.0.clone(),
+                            curve25519_pk_hex: m.1.clone(),
+                            device_id: m.2 as u32,
+                            onetimekey: m.6.clone().filter(|s| !s.is_empty()),
+                        };
+                        self.peers.insert(to_str.clone(), restored_peer.clone());
+                        peer = Some(restored_peer);
                     }
                 }
             }

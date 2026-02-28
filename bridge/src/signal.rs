@@ -782,6 +782,27 @@ impl SignalManager {
 
     /// Get all peer mappings with local signal key info.
     /// Returns (nostr_pubkey, signal_pubkey, device_id, name, local_signal_pubkey, local_signal_privkey, onetimekey).
+
+    /// Look up a single peer mapping by nostr pubkey (avoids full table scan).
+    pub async fn get_peer_mapping_by_nostr_pubkey(&self, nostr_pubkey: &str) -> Result<Option<(String, String, i64, String, Option<String>, Option<String>, Option<String>)>> {
+        let row = signal_store::sqlx::query(
+            "SELECT nostr_pubkey, signal_pubkey, device_id, name, local_signal_pubkey, local_signal_privkey, onetimekey FROM peer_mapping WHERE nostr_pubkey = ?"
+        )
+        .bind(nostr_pubkey)
+        .fetch_optional(self.pool.database())
+        .await?;
+        Ok(row.map(|r| {
+            let nostr_pk: String = r.get::<String, _>(0);
+            let signal_pk: String = r.get::<String, _>(1);
+            let device_id: i64 = r.get::<i64, _>(2);
+            let name: String = r.get::<String, _>(3);
+            let local_sig_pk: Option<String> = r.try_get::<String, _>(4).ok();
+            let local_sig_sk: Option<String> = r.try_get::<String, _>(5).ok();
+            let otk: Option<String> = r.try_get::<String, _>(6).ok();
+            (nostr_pk, signal_pk, device_id, name, local_sig_pk, local_sig_sk, otk)
+        }))
+    }
+
     pub async fn get_all_peer_mappings_full(&self) -> Result<Vec<(String, String, i64, String, Option<String>, Option<String>, Option<String>)>> {
         let rows = signal_store::sqlx::query(
             "SELECT nostr_pubkey, signal_pubkey, device_id, name, local_signal_pubkey, local_signal_privkey, onetimekey FROM peer_mapping ORDER BY created_at"

@@ -128,6 +128,17 @@ function appendKeychatAllowFromStore(pubkey: string, accountId?: string): void {
 }
 
 /** Check if this account has any allowed peers (config + store). */
+/** Get the owner pubkey — first entry in config allowFrom list. */
+function getOwnerPubkey(accountId: string, runtime: ReturnType<typeof getKeychatRuntime>): string | null {
+  const cfg = runtime.config.loadConfig();
+  const account = resolveKeychatAccount({ cfg, accountId });
+  const configAllowFrom = (account.config.allowFrom ?? []).map((e: unknown) => String(e));
+  if (configAllowFrom.length > 0) return normalizePubkey(configAllowFrom[0]);
+  const storeEntries = readKeychatAllowFromStore(accountId);
+  if (storeEntries.length > 0) return normalizePubkey(storeEntries[0]);
+  return null;
+}
+
 function hasAnyAllowedPeers(accountId: string, runtime: ReturnType<typeof getKeychatRuntime>): boolean {
   const cfg = runtime.config.loadConfig();
   const account = resolveKeychatAccount({ cfg, accountId });
@@ -230,6 +241,28 @@ function upsertKeychatPairingRequest(senderId: string, meta?: Record<string, str
   } catch {
     return { code: "", created: false };
   }
+}
+
+function listKeychatPairingRequests(accountId?: string): Array<{ pubkey: string; name?: string; code: string }> {
+  const pairingPath = resolveKeychatCredPath("pairing");
+  try {
+    if (!existsSync(pairingPath)) return [];
+    const data = JSON.parse(readFileSync(pairingPath, "utf-8"));
+    return (data.requests || [])
+      .filter((r: any) => !accountId || !r.accountId || r.accountId === accountId)
+      .map((r: any) => ({ pubkey: normalizePubkey(r.id), name: r.meta?.name, code: r.code }));
+  } catch { return []; }
+}
+
+function removePairingRequest(pubkey: string, accountId?: string): void {
+  const pairingPath = resolveKeychatCredPath("pairing");
+  try {
+    if (!existsSync(pairingPath)) return;
+    const data = JSON.parse(readFileSync(pairingPath, "utf-8"));
+    const normalizedPk = normalizePubkey(pubkey);
+    data.requests = (data.requests || []).filter((r: any) => normalizePubkey(r.id) !== normalizedPk);
+    writeFileSync(pairingPath, JSON.stringify(data, null, 2) + "\n", "utf-8");
+  } catch { /* ignore */ }
 }
 
 /** Look up the accountId for a pairing request by peer id. */
@@ -1742,18 +1775,12 @@ async function handleFriendRequestInner(
   // Do NOT call savePeerMapping here — it would overwrite local_signal_pubkey/privkey with NULL.
 
   // Protocol Step 3: Receiver sends accept-first as kind:4 PreKey to initiator onetimekey.
-  let pairingGreeting = "";
   if (isPairingPending) {
-    const { code } = upsertKeychatPairingRequest(msg.from_pubkey, { name: hello.peer_name }, accountId);
-    pairingGreeting = code
-      ? `\n\nPairing code: ${code}\nAsk the bot owner to approve with:\n  openclaw pairing approve keychat ${code}`
-      : "";
+    upsertKeychatPairingRequest(msg.from_pubkey, { name: hello.peer_name }, accountId);
   }
   const greetingText = isPairingPending
-    ? `👋 Hi! I received your request. It's pending approval — the owner will review it shortly.${pairingGreeting}`
-    : `👋 Hi! I'm ${displayName}. We're connected now — feel free to chat!`;
-  // Wrap as KeychatMessage so the receiver can identify this as a hello reply (type 102)
-  const helloReplyMsg = JSON.stringify({
+    ? `👋 Hi! Your request has been sent to the owner for approval. Please wait.`
+    : `👋 Hi! I'm ${displayName}. We're connected now — feel free to chat!`;  const helloReplyMsg = JSON.stringify({
     type: 100,  // KeyChatEventKinds.dm — Keychat app displays type 100 as chat message (type 102 is silently dropped)
     c: "signal",
     msg: greetingText,
@@ -1774,6 +1801,24 @@ async function handleFriendRequestInner(
 
   // Handle receiving address rotation after send (per-peer, addresses persisted to DB)
   await handleReceivingAddressRotation(bridge, accountId, sendResult, hello.peer_nostr_pubkey);
+
+  // Notify owner about pending friend request
+  if (isPairingPending) {
+    const ownerPubkey = getOwnerPubkey(accountId, runtime);
+    if (ownerPubkey && ownerPubkey !== msg.from_pubkey) {
+      const peerPrefix = msg.from_pubkey.slice(0, 8);
+      const notifyText = `🔔 ${hello.peer_name || "Unknown"} (${peerPrefix}) wants to add your agent as a friend. Reply "同意 ${hello.peer_name || peerPrefix}" to approve or "拒绝 ${hello.peer_name || peerPrefix}" to reject.`;
+      const notifyMsg = JSON.stringify({ type: 100, c: "signal", msg: notifyText });
+      try {
+        await retrySend(() => bridge.sendMessage(ownerPubkey, notifyMsg));
+        ctx.log?.info(`[${accountId}] Notified owner ${ownerPubkey.slice(0, 12)} about friend request from ${msg.from_pubkey.slice(0, 12)}`);
+      } catch (e) {
+        ctx.log?.error(`[${accountId}] Failed to notify owner about friend request: ${e}`);
+      }
+    } else if (!ownerPubkey) {
+      ctx.log?.warn?.(`[${accountId}] No owner configured — cannot notify about pairing request from ${msg.from_pubkey.slice(0, 12)}`);
+    }
+  }
 
   const initiatedByUs = friendRequestManager.isInitiatorSidePending(accountId, hello.peer_nostr_pubkey);
 
@@ -2651,15 +2696,51 @@ async function handleEncryptedDM(
     }
     if (dmAccess.decision === "pairing") {
       ctx.log?.info(`[${accountId}] ⛔ DM from ${peerNostrPubkey} — pending pairing`);
-      const { code, created } = upsertKeychatPairingRequest(peerNostrPubkey, { name: peer.name }, accountId);
-      if (created && code) {
-        try {
-          const pairingResult = await retrySend(() => bridge.sendMessage(peerNostrPubkey, buildKeychatPairingReply(code, peerNostrPubkey)));
-          await handleReceivingAddressRotation(bridge, accountId, pairingResult, peerNostrPubkey);
-        } catch { /* best effort */ }
-      }
       return;
     }
+    // Check if this is the owner approving/rejecting a friend request
+    const ownerPk = getOwnerPubkey(accountId, runtime);
+    if (ownerPk && peerNostrPubkey === ownerPk) {
+      const approveMatch = displayText.match(/^(同意|approve|好)\s*(.*)/i);
+      const rejectMatch = displayText.match(/^(拒绝|reject|不)\s*(.*)/i);
+      if (approveMatch || rejectMatch) {
+        const isApprove = !!approveMatch;
+        const nameHint = (approveMatch?.[2] || rejectMatch?.[2] || "").trim();
+        const pending = listKeychatPairingRequests(accountId);
+        // Find matching request by name or pubkey prefix
+        let matched: { pubkey: string; name?: string } | null = null;
+        if (pending.length === 1 && !nameHint) {
+          matched = pending[0];
+        } else {
+          for (const p of pending) {
+            if (nameHint && p.name && p.name.toLowerCase().includes(nameHint.toLowerCase())) { matched = p; break; }
+            if (nameHint && p.pubkey.startsWith(nameHint)) { matched = p; break; }
+          }
+        }
+        if (matched) {
+          if (isApprove) {
+            appendKeychatAllowFromStore(matched.pubkey, accountId);
+            removePairingRequest(matched.pubkey, accountId);
+            // Notify the approved peer
+            const approveMsg = JSON.stringify({ type: 100, c: "signal", msg: `✅ Your request has been approved! Feel free to chat.` });
+            try { await retrySend(() => bridge.sendMessage(matched.pubkey, approveMsg)); } catch { /* best effort */ }
+            // Confirm to owner
+            const confirmMsg = JSON.stringify({ type: 100, c: "signal", msg: `✅ Approved ${matched.name || matched.pubkey.slice(0, 8)}.` });
+            try { await retrySend(() => bridge.sendMessage(ownerPk, confirmMsg)); } catch { /* best effort */ }
+            ctx.log?.info(`[${accountId}] Owner approved friend request from ${matched.pubkey.slice(0, 12)}`);
+          } else {
+            removePairingRequest(matched.pubkey, accountId);
+            const rejectMsg = JSON.stringify({ type: 100, c: "signal", msg: `❌ Your request has been rejected.` });
+            try { await retrySend(() => bridge.sendMessage(matched.pubkey, rejectMsg)); } catch { /* best effort */ }
+            const confirmMsg = JSON.stringify({ type: 100, c: "signal", msg: `❌ Rejected ${matched.name || matched.pubkey.slice(0, 8)}.` });
+            try { await retrySend(() => bridge.sendMessage(ownerPk, confirmMsg)); } catch { /* best effort */ }
+            ctx.log?.info(`[${accountId}] Owner rejected friend request from ${matched.pubkey.slice(0, 12)}`);
+          }
+          return;
+        }
+      }
+    }
+
     ctx.log?.info(`[${accountId}] Routing as 1:1 DM (no group context detected)`);
     await dispatchToAgent(bridge, accountId, peerNostrPubkey, senderLabel, displayText, msg.event_id, runtime, ctx, mediaPath);
   }

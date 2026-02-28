@@ -132,6 +132,9 @@ function appendKeychatAllowFromStore(pubkey: string, accountId?: string): void {
 function getOwnerPubkey(accountId: string, runtime: ReturnType<typeof getKeychatRuntime>): string | null {
   const cfg = runtime.config.loadConfig();
   const account = resolveKeychatAccount({ cfg, accountId });
+  // Explicit owner field takes priority
+  if (account.config.owner) return normalizePubkey(String(account.config.owner));
+  // Fallback: first entry in allowFrom
   const configAllowFrom = (account.config.allowFrom ?? []).map((e: unknown) => String(e));
   if (configAllowFrom.length > 0) return normalizePubkey(configAllowFrom[0]);
   const storeEntries = readKeychatAllowFromStore(accountId);

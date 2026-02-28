@@ -35,7 +35,7 @@ pub struct EncryptResult {
     /// Message key hash (for deduplication)
     pub msg_key_hash: String,
     /// Previous alice addresses (for cleanup)
-    pub alice_addrs: Option<Vec<String>>,
+    pub my_next_addrs: Option<Vec<String>>,
     /// Whether this is a pre-key message
     pub is_prekey: bool,
 }
@@ -44,7 +44,7 @@ pub struct EncryptResult {
 pub struct DecryptResult {
     pub plaintext: Vec<u8>,
     pub msg_key_hash: String,
-    pub alice_addrs: Option<Vec<String>>,
+    pub my_next_addrs: Option<Vec<String>>,
 }
 
 pub struct SignalManager {
@@ -370,7 +370,7 @@ impl SignalManager {
         let remote_address =
             ProtocolAddress::new(to_curve25519_pubkey.to_string(), device_id.into());
 
-        let (ciphertext_msg, new_receiving, msg_key_hash, alice_addrs) = message_encrypt(
+        let (ciphertext_msg, new_receiving, msg_key_hash, my_next_addrs) = message_encrypt(
             plaintext.as_bytes(),
             &remote_address,
             &mut store.session_store,
@@ -389,7 +389,7 @@ impl SignalManager {
             ciphertext: ciphertext_msg.serialize().to_vec(),
             new_receiving_address: new_receiving,
             msg_key_hash,
-            alice_addrs,
+            my_next_addrs,
             is_prekey,
         })
     }
@@ -405,7 +405,7 @@ impl SignalManager {
         let remote_address =
             ProtocolAddress::new(to_curve25519_pubkey.to_string(), device_id.into());
 
-        let (ciphertext_msg, new_receiving, msg_key_hash, alice_addrs) = message_encrypt(
+        let (ciphertext_msg, new_receiving, msg_key_hash, my_next_addrs) = message_encrypt(
             plaintext.as_bytes(),
             &remote_address,
             &mut store.session_store,
@@ -424,7 +424,7 @@ impl SignalManager {
             ciphertext: ciphertext_msg.serialize().to_vec(),
             new_receiving_address: new_receiving,
             msg_key_hash,
-            alice_addrs,
+            my_next_addrs,
             is_prekey,
         })
     }
@@ -458,7 +458,7 @@ impl SignalManager {
         };
 
         let mut csprng = OsRng;
-        let (plaintext, msg_key_hash, alice_addrs) = message_decrypt(
+        let (plaintext, msg_key_hash, my_next_addrs) = message_decrypt(
             &ciphertext_msg,
             &remote_address,
             &mut store.session_store,
@@ -475,7 +475,7 @@ impl SignalManager {
         Ok(DecryptResult {
             plaintext,
             msg_key_hash,
-            alice_addrs,
+            my_next_addrs,
         })
     }
 
@@ -500,7 +500,7 @@ impl SignalManager {
         };
 
         let mut csprng = OsRng;
-        let (plaintext, msg_key_hash, alice_addrs) = message_decrypt(
+        let (plaintext, msg_key_hash, my_next_addrs) = message_decrypt(
             &ciphertext_msg,
             &remote_address,
             &mut store.session_store,
@@ -517,7 +517,7 @@ impl SignalManager {
         Ok(DecryptResult {
             plaintext,
             msg_key_hash,
-            alice_addrs,
+            my_next_addrs,
         })
     }
 

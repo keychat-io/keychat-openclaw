@@ -1099,8 +1099,8 @@ impl BridgeState {
             }
         }
 
-        if let Some(addrs) = result.alice_addrs {
-            response["alice_addrs"] = serde_json::to_value(addrs)?;
+        if let Some(addrs) = result.my_next_addrs {
+            response["my_next_addrs"] = serde_json::to_value(addrs)?;
         }
 
         Ok(response)

@@ -437,12 +437,12 @@ export class KeychatBridgeClient {
     from: string,
     ciphertext: string,
     isPrekey?: boolean,
-  ): Promise<{ plaintext: string; alice_addrs?: string[] }> {
+  ): Promise<{ plaintext: string; my_next_addrs?: string[] }> {
     return (await this.call("decrypt_message", {
       from,
       ciphertext,
       is_prekey: isPrekey ?? false,
-    })) as { plaintext: string; alice_addrs?: string[] };
+    })) as { plaintext: string; my_next_addrs?: string[] };
   }
 
   /** Connect to Nostr relays. */

@@ -2371,10 +2371,10 @@ async function handleEncryptedDM(
           // initiatedByUs was already set to true when we sent the hello (ensureOutgoingHelloAndHandshakeSubscriptions).
           friendRequestManager.setSessionEstablished(accountId, senderNostrId);
 
-          // Step 4: after accept-first decrypt, subscribe to per-peer ratchet addresses from alice_addrs.
+          // Step 4: after accept-first decrypt, subscribe to per-peer ratchet addresses from my_next_addrs.
           try {
-            const aliceAddrs: string[] = decryptResult?.alice_addrs ?? [];
-            const added = await registerPeerReceivingAddresses(bridge, accountId, senderNostrId, aliceAddrs);
+            const myNextAddrs: string[] = decryptResult?.my_next_addrs ?? [];
+            const added = await registerPeerReceivingAddresses(bridge, accountId, senderNostrId, myNextAddrs);
             if (added > 0) {
               const total = getPeerSubscribedAddresses(accountId).get(senderNostrId)?.length ?? 0;
               ctx.log?.info(`[${accountId}] Registered ${added} receiving address(es) for new peer ${senderNostrId.slice(0,16)} (total ${total})`);
@@ -2477,10 +2477,10 @@ async function handleEncryptedDM(
   // - Protocol Step 4: setSessionEstablished in accept-first handlers.
   // - Protocol Step 5/6: set NORMAL_CHAT only when flushing first queued post-handshake send.
 
-  // Step 5+: after decrypt, use ONLY alice_addrs from this message (per-peer ratchet addresses).
+  // Step 5+: after decrypt, use ONLY my_next_addrs from this message (per-peer ratchet addresses).
   try {
-    const aliceAddrs: string[] = (decryptResult as any)?.alice_addrs ?? [];
-    const newAddrs = await registerPeerReceivingAddresses(bridge, accountId, peerNostrPubkey, aliceAddrs);
+    const myNextAddrs: string[] = (decryptResult as any)?.my_next_addrs ?? [];
+    const newAddrs = await registerPeerReceivingAddresses(bridge, accountId, peerNostrPubkey, myNextAddrs);
     if (newAddrs > 0) {
       const peerAddrs = getPeerSubscribedAddresses(accountId).get(peerNostrPubkey) ?? [];
       ctx.log?.info(

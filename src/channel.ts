@@ -889,6 +889,7 @@ export const keychatPlugin: ChannelPlugin<ResolvedKeychatAccount> = {
     deliveryMode: "direct",
     textChunkLimit: 4000,
     sendText: async ({ to, text, accountId }) => {
+      console.log(`[keychat] outbound sendText called: to=${to} text=${(text ?? "").slice(0, 80)} accountId=${accountId ?? "(default)"}`);
       const aid = accountId ?? DEFAULT_ACCOUNT_ID;
       const bridge = await waitForBridge(aid);
       const core = getKeychatRuntime();

@@ -113,10 +113,11 @@ impl NostrTransport {
         let now_secs = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)?
             .as_secs();
-        // Start from last processed event's created_at (no margin needed — just re-fetch from there)
-        // Duplicates are filtered by processed_events table
+        // Start from last processed event minus a 10-minute buffer to catch events
+        // with created_at slightly before last_seen (e.g. network delays, clock skew).
+        // Duplicates are filtered by processed_events table.
         let since_secs = match last_seen {
-            Some(ts) => ts,
+            Some(ts) => ts.saturating_sub(600), // 10 min buffer
             None => now_secs.saturating_sub(3600),
         };
         let since = Timestamp::from(since_secs);

@@ -48,7 +48,7 @@ pub struct DecryptResult {
 }
 
 pub struct SignalManager {
-    pub(crate) pool: LitePool,
+    pool: LitePool,
     stores: HashMap<[u8; 33], KeyChatSignalProtocolStore>,
 }
 
@@ -642,9 +642,6 @@ impl SignalManager {
         ).execute(self.pool.database()).await;
         let _ = signal_store::sqlx::query(
             "ALTER TABLE peer_mapping ADD COLUMN onetimekey TEXT"
-        ).execute(self.pool.database()).await;
-        let _ = signal_store::sqlx::query(
-            "ALTER TABLE peer_mapping ADD COLUMN last_send_address TEXT"
         ).execute(self.pool.database()).await;
         Ok(())
     }

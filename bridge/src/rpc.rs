@@ -729,29 +729,6 @@ impl BridgeState {
         let mut dest_pubkey = nostr_pubkey.clone();
         let mut sending_to_onetimekey = false;
 
-        // Check for persisted last_send_address first (reliable for proactive sends)
-        let last_send_addr: Option<String> = if let Some(ref _p) = peer {
-            signal_store::sqlx::query_scalar::<_, String>(
-                "SELECT last_send_address FROM peer_mapping WHERE nostr_pubkey = ? AND last_send_address IS NOT NULL"
-            )
-            .bind(&nostr_pubkey)
-            .fetch_optional(signal.pool.database())
-            .await
-            .ok()
-            .flatten()
-        } else {
-            None
-        };
-
-        if let Some(ref addr) = last_send_addr {
-            if !addr.is_empty() {
-                log::info!("Using persisted last_send_address for {}: {}", &nostr_pubkey[..12.min(nostr_pubkey.len())], addr);
-                dest_pubkey = addr.clone();
-            }
-        }
-
-        // Fall back to bobAddress derivation if no persisted address
-        if last_send_addr.is_none() || last_send_addr.as_deref() == Some("") {
         let bob_address = if let Some(ref lsk) = local_signal_pubkey {
             signal.get_bob_address_by_local_key(lsk, &signal_pubkey, device_id).await?
         } else {
@@ -770,8 +747,6 @@ impl BridgeState {
                 dest_pubkey = derived;
             }
         }
-
-        } // end fallback bobAddress block
 
         // If destination is still the nostr pubkey and peer has onetimekey, use onetimekey
         if dest_pubkey == nostr_pubkey {
@@ -891,19 +866,6 @@ impl BridgeState {
                 Err(e) => {
                     log::warn!("Failed to derive receiving address from ratchet key: {}", e);
                 }
-            }
-        }
-
-        // Persist last_send_address for this peer so proactive sends use the correct address
-        if !sending_to_onetimekey {
-            if let Some(ref signal) = self.signal {
-                let _ = signal_store::sqlx::query(
-                    "UPDATE peer_mapping SET last_send_address = ? WHERE nostr_pubkey = ?"
-                )
-                .bind(&dest_pubkey)
-                .bind(&nostr_pubkey)
-                .execute(signal.pool.database())
-                .await;
             }
         }
 

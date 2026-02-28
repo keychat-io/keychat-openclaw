@@ -422,10 +422,21 @@ impl BridgeState {
             .and_then(|v| v.as_u64())
             .unwrap_or(self.next_device_id as u64) as u32;
 
-        // Process the pre-key bundle to establish Signal session
+        // Generate per-peer ephemeral Signal keypair for B (receiver) — matches Keychat app behavior
+        // where each room gets its own Signal identity via createSignalId()
+        let (eph_pk, eph_sk) = KeychatAccount::generate_ephemeral_signal_keypair();
+        let eph_pk_hex = hex::encode(&eph_pk);
+        let eph_sk_hex = hex::encode(&eph_sk);
+
+        // Process the pre-key bundle using the ephemeral keypair (not account's global key)
         signal
-            .process_prekey_bundle_from_model(account, &qr_model, device_id)
+            .process_prekey_bundle_from_model_with_keypair(&eph_pk, &eph_sk, &qr_model, device_id)
             .await?;
+
+        log::info!(
+            "process_hello: established session with ephemeral Signal key {} for peer {}",
+            &eph_pk_hex[..16], &qr_model.pubkey[..16]
+        );
 
         // Track the peer
         let peer = PeerSession {
@@ -440,10 +451,10 @@ impl BridgeState {
         };
         self.peers.insert(qr_model.pubkey.clone(), peer);
 
-        // Persist peer mapping (incoming hello uses account's default signal key)
+        // Persist peer mapping with ephemeral Signal keys (per-peer, not account global)
         // Include onetimekey so it survives bridge restart (needed to send accept-first to correct address)
-        let local_sig_pk = account.signal_pubkey_hex();
-        let local_sig_sk = hex::encode(&account.signal_private_key_bytes());
+        let local_sig_pk = eph_pk_hex;
+        let local_sig_sk = eph_sk_hex;
         let otk = if qr_model.onetimekey.is_empty() { None } else { Some(qr_model.onetimekey.as_str()) };
         signal
             .save_peer_mapping_full_with_spk_otk(

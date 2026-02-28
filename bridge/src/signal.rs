@@ -1196,6 +1196,50 @@ impl SignalManager {
             Ok(false)
         }
     }
+
+
+    /// Process a received pre-key bundle using a specific (ephemeral) Signal keypair.
+    /// Used by B (receiver) when processing an incoming hello, so each peer gets
+    /// an isolated Signal session with its own ephemeral identity.
+    pub async fn process_prekey_bundle_from_model_with_keypair(
+        &mut self,
+        pk_bytes: &[u8; 33],
+        sk_bytes: &[u8; 32],
+        model: &QRUserModel,
+        device_id: u32,
+    ) -> Result<()> {
+        let store = self.get_or_create_store_for_keypair(pk_bytes, sk_bytes)?;
+
+        let remote_address = ProtocolAddress::new(model.curve25519_pk_hex.clone(), device_id.into());
+        let identity_key = IdentityKey::decode(&hex::decode(&model.curve25519_pk_hex)?)?;
+        let signed_prekey_public = PublicKey::deserialize(&hex::decode(&model.signed_public)?)?;
+        let prekey_public = PublicKey::deserialize(&hex::decode(&model.prekey_pubkey)?)?;
+        let reg_id = Self::registration_id_from_pubkey(&hex::decode(&model.curve25519_pk_hex)?);
+
+        let bundle = PreKeyBundle::new(
+            reg_id,
+            device_id.into(),
+            Some((model.prekey_id.into(), prekey_public)),
+            model.signed_id.into(),
+            signed_prekey_public,
+            hex::decode(&model.signed_signature)?,
+            identity_key,
+        )?;
+
+        let mut csprng = OsRng;
+        process_prekey_bundle(
+            &remote_address,
+            &mut store.session_store,
+            &mut store.identity_store,
+            &bundle,
+            SystemTime::now(),
+            &mut csprng,
+        )
+        .await?;
+
+        Ok(())
+    }
+
 }
 
 /// Derive a Nostr receiving address from a Signal ratchet key pair seed.

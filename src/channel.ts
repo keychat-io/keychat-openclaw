@@ -2523,7 +2523,7 @@ async function handleEncryptedDM(
   // and optionally the `name` field (MsgReply for quoted messages)
   let displayText = plaintext;
   let groupContext: { groupId: string; groupMessage: { message: string; pubkey: string; subtype?: number; ext?: string } } | null = null;
-  ctx.log?.info(`[${accountId}] Raw plaintext (first 300 chars): ${plaintext.slice(0, 300)}`);
+  ctx.log?.debug(`[${accountId}] Decrypted message (${plaintext.length} chars)`);
   try {
     const parsed = JSON.parse(plaintext);
     if (parsed && typeof parsed.msg === "string") {
@@ -2681,7 +2681,7 @@ async function handleEncryptedDM(
   }
 
   ctx.log?.info(
-    `[${accountId}] Decrypted from ${peer.name} (${peerNostrPubkey}): ${displayText.slice(0, 50)}...`,
+    `[${accountId}] Decrypted message from peer ${peerNostrPubkey} (${displayText.length} chars)`,
   );
 
   // Forward to OpenClaw's message pipeline via shared dispatch helper

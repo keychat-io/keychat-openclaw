@@ -24,7 +24,7 @@ export interface MediaUploadResult {
   kctype: string;
 }
 
-/** Default Blossom media server (same as Keychat app default) */
+/** Default media server (same as Keychat app default) */
 const DEFAULT_MEDIA_SERVER = "https://relay.keychat.io";
 
 /** Determine kctype from file extension or mime type */
@@ -32,7 +32,6 @@ function resolveKctype(filePath: string, mimeType?: string): string {
   const ext = extname(filePath).toLowerCase();
   const imageExts = [".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp", ".tiff", ".svg"];
   const videoExts = [".mp4", ".avi", ".mov", ".mkv", ".webm", ".flv", ".wmv", ".m4v"];
-
   const audioExts = [".ogg", ".opus", ".aac", ".m4a", ".mp3", ".wav"];
 
   if (mimeType?.startsWith("image/") || imageExts.includes(ext)) return "image";
@@ -60,6 +59,7 @@ async function encryptFile(filePath: string): Promise<{
   const cipher = createCipheriv("aes-256-ctr", key, iv);
   const encrypted = Buffer.concat([cipher.update(fileBytes), cipher.final()]);
 
+  // base64-encoded SHA256 of encrypted bytes (matches Keychat app's base64Hash mode)
   const sha256 = createHash("sha256").update(encrypted).digest("base64");
 
   const fileName = basename(filePath);
@@ -76,7 +76,67 @@ async function encryptFile(filePath: string): Promise<{
 }
 
 /**
- * Upload encrypted bytes to a Blossom server.
+ * Upload encrypted bytes via Keychat S3 relay (presigned URL flow).
+ *
+ * Flow (same as Keychat app's AwsS3.encryptAndUploadByRelay):
+ * 1. POST /api/v1/object with {cashu, length, sha256} -> get presigned S3 URL + headers + access_url
+ * 2. PUT to the presigned S3 URL with encrypted bytes
+ * 3. Return the access_url
+ */
+async function uploadToS3Relay(
+  encrypted: Buffer,
+  hash: string,
+  server?: string,
+): Promise<string> {
+  const baseUrl = server || DEFAULT_MEDIA_SERVER;
+
+  // Step 1: Get presigned upload URL
+  const presignResponse = await fetch(`${baseUrl}/api/v1/object`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      cashu: "",
+      length: encrypted.length,
+      sha256: hash,
+    }),
+  });
+
+  if (!presignResponse.ok) {
+    const body = await presignResponse.text().catch(() => "");
+    throw new Error(`S3 relay presign failed (${presignResponse.status}): ${body}`);
+  }
+
+  const params = (await presignResponse.json()) as {
+    url?: string;
+    headers?: Record<string, string>;
+    access_url?: string;
+  };
+
+  if (!params.url) throw new Error("S3 relay presign response missing url");
+  if (!params.access_url) throw new Error("S3 relay presign response missing access_url");
+
+  // Step 2: Upload to presigned S3 URL
+  const uploadHeaders: Record<string, string> = {
+    ...(params.headers || {}),
+    "Content-Type": "application/octet-stream",
+  };
+
+  const uploadResponse = await fetch(params.url, {
+    method: "PUT",
+    headers: uploadHeaders,
+    body: new Uint8Array(encrypted),
+  });
+
+  if (!uploadResponse.ok) {
+    const body = await uploadResponse.text().catch(() => "");
+    throw new Error(`S3 upload failed (${uploadResponse.status}): ${body}`);
+  }
+
+  return params.access_url;
+}
+
+/**
+ * Upload encrypted bytes to a Blossom server (fallback).
  * Uses Nostr auth (kind:24242 event signed by agent's key).
  */
 async function uploadToBlossom(
@@ -117,11 +177,29 @@ async function uploadToBlossom(
 }
 
 /**
+ * Detect whether a server supports S3 relay upload by checking /api/v1/info.
+ */
+async function isS3Relay(server: string): Promise<boolean> {
+  try {
+    const response = await fetch(`${server}/api/v1/info`, {
+      signal: AbortSignal.timeout(5000),
+    });
+    if (!response.ok) return false;
+    const data = (await response.json()) as { maxsize?: number };
+    return typeof data.maxsize === "number";
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Encrypt and upload a local file, returning a Keychat media URL.
+ *
+ * Tries S3 relay upload first (Keychat's default), falls back to Blossom.
  *
  * @param filePath - Local file path to upload
  * @param signEvent - Function to sign a Nostr kind:24242 event for Blossom auth
- * @param server - Optional Blossom server URL (defaults to relay.keychat.io)
+ * @param server - Optional media server URL (defaults to relay.keychat.io)
  * @param mimeType - Optional MIME type hint
  */
 export async function encryptAndUpload(
@@ -132,8 +210,17 @@ export async function encryptAndUpload(
   voiceNote?: { duration?: number; waveform?: string },
 ): Promise<MediaUploadResult> {
   const { encrypted, key, iv, hash, suffix, sourceName } = await encryptFile(filePath);
-  const url = await uploadToBlossom(encrypted, hash, signEvent, server);
+  const baseUrl = server || DEFAULT_MEDIA_SERVER;
   const kctype = resolveKctype(filePath, mimeType);
+
+  // Try S3 relay first, fall back to Blossom
+  let url: string;
+  const s3 = await isS3Relay(baseUrl);
+  if (s3) {
+    url = await uploadToS3Relay(encrypted, hash, baseUrl);
+  } else {
+    url = await uploadToBlossom(encrypted, hash, signEvent, baseUrl);
+  }
 
   // Construct the Keychat media URL (same format as app)
   const parsedUrl = new URL(url);

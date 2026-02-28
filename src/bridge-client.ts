@@ -491,10 +491,6 @@ export class KeychatBridgeClient {
   }
 
   /** Send a hello/friend request to a Nostr pubkey via Gift Wrap. */
-  async sendGiftWrapDM(toPubkey: string, message: string): Promise<{ sent: boolean; event_id: string }> {
-    return (await this.call("send_gift_wrap_dm", { to_pubkey: toPubkey, message })) as any;
-  }
-
   async sendHello(toPubkey: string, name?: string): Promise<{ sent: boolean; event_id: string; to_pubkey: string; onetimekey?: string }> {
     return (await this.call("send_hello", { to_pubkey: toPubkey, name })) as any;
   }

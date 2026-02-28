@@ -132,7 +132,6 @@ impl BridgeState {
             "send_profile" => self.handle_send_profile(req.params).await,
 
             // --- Messaging ---
-            "send_gift_wrap_dm" => self.handle_send_gift_wrap_dm(req.params).await,
             "send_message" => self.handle_send_message(req.params).await,
             "decrypt_message" => self.handle_decrypt_message(req.params).await,
             "parse_prekey_sender" => self.handle_parse_prekey_sender(req.params).await,
@@ -635,29 +634,7 @@ impl BridgeState {
     }
 
     ///   3. Signal encrypt the content
-    /// Send a NIP-17 Gift Wrap DM (kind:1059) to any nostr pubkey.
-    /// Unlike Signal DMs, this doesn't depend on ratchet state.
-    async fn handle_send_gift_wrap_dm(&self, params: serde_json::Value) -> Result<serde_json::Value> {
-        let to_pubkey = params["to_pubkey"].as_str()
-            .ok_or_else(|| anyhow::anyhow!("Missing to_pubkey"))?;
-        let message = params["message"].as_str()
-            .ok_or_else(|| anyhow::anyhow!("Missing message"))?;
-
-        let account = self.account.as_ref()
-            .ok_or_else(|| anyhow::anyhow!("Account not initialized"))?;
-        let transport = self.transport.as_ref()
-            .ok_or_else(|| anyhow::anyhow!("Not connected to relays"))?;
-
-        let event_id = transport.send_gift_wrap(account, to_pubkey, message).await?;
-        log::info!("Sent Gift Wrap DM to {} - event {}", &to_pubkey[..12.min(to_pubkey.len())], event_id);
-
-        Ok(serde_json::json!({
-            "sent": true,
-            "event_id": event_id,
-        }))
-    }
-
-        ///   4. Base64 encode ciphertext
+    ///   4. Base64 encode ciphertext
     ///   5. NIP-04 encrypt with ephemeral sender key
     ///   6. Publish kind:4 to relay
     async fn handle_send_message(

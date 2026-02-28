@@ -1811,9 +1811,10 @@ async function handleFriendRequestInner(
     if (ownerPubkey && ownerPubkey !== msg.from_pubkey) {
       const peerPrefix = msg.from_pubkey.slice(0, 8);
       const notifyText = `🔔 ${hello.peer_name || "Unknown"} (${peerPrefix}) wants to add your agent as a friend. Do you agree?`;
+      const notifyMsg = JSON.stringify({ type: 100, c: "signal", msg: notifyText });
       try {
-        await retrySend(() => bridge.sendGiftWrapDM(ownerPubkey, notifyText));
-        ctx.log?.info(`[${accountId}] Notified owner ${ownerPubkey.slice(0, 12)} via Gift Wrap about friend request from ${msg.from_pubkey.slice(0, 12)}`);
+        await retrySend(() => bridge.sendMessage(ownerPubkey, notifyMsg));
+        ctx.log?.info(`[${accountId}] Notified owner ${ownerPubkey.slice(0, 12)} about friend request from ${msg.from_pubkey.slice(0, 12)}`);
       } catch (e) {
         ctx.log?.error(`[${accountId}] Failed to notify owner about friend request: ${e}`);
       }

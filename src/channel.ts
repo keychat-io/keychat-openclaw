@@ -1178,7 +1178,6 @@ export const keychatPlugin: ChannelPlugin<ResolvedKeychatAccount> = {
 
   gateway: {
     startAccount: async (ctx) => {
-     try {
       const runtime = getKeychatRuntime();
       const account = ctx.account;
 

@@ -2378,8 +2378,6 @@ async function handleEncryptedDM(
           // Do NOT call savePeerMapping here — it would overwrite local_signal_pubkey/privkey
           // saved during send_hello with NULL, breaking session recovery after bridge restart.
           // The peer_mapping row was already written by send_hello with correct ephemeral keys.
-          // Clear sensitive PreKey material now that session is established
-          try { await bridge.clearPrekeyMaterial(senderNostrId); } catch { /* best effort */ }
           ctx.log?.info(`[${accountId}] ✅ Session established with peer ${senderNostrId.slice(0,16)}... (signal: ${sigKey.slice(0,16)}...)`);
 
           // A-role: Protocol Step 4 — received accept-first, reproduced X3DH, session established.
@@ -2395,6 +2393,9 @@ async function handleEncryptedDM(
               ctx.log?.info(`[${accountId}] Registered ${added} receiving address(es) for new peer ${senderNostrId.slice(0,16)} (total ${total})`);
             }
           } catch { /* best effort */ }
+
+          // Clear sensitive PreKey material after address rotation is complete
+          try { await bridge.clearPrekeyMaterial(senderNostrId); } catch { /* best effort */ }
 
           const initiatedByUs = friendRequestManager.isInitiatorSidePending(accountId, senderNostrId);
           if (initiatedByUs) {
@@ -2419,7 +2420,9 @@ async function handleEncryptedDM(
               displayText = parsed.msg;
             }
             // If this is a PrekeyMessageModel (hello reply wrapper), extract the welcome message
-            if (parsed?.nostrId && parsed?.signalId) {
+            if (parsed?.nostrId && typeof parsed.nostrId === "string"
+                && parsed?.signalId && typeof parsed.signalId === "string"
+                && typeof parsed.time === "number") {
               ctx.log?.info(`[${accountId}] Hello reply from ${senderNostrId.slice(0,16)}... (${displayText.length} chars)`);
               // Only skip if there is no actual message content to display
               if (!displayText || displayText === plaintext) {

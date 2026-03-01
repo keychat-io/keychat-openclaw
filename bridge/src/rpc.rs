@@ -725,47 +725,23 @@ impl BridgeState {
             .ok_or_else(|| anyhow::anyhow!("Signal not initialized"))?;
 
         // Determine destination address (mirrors Keychat's _getSignalToAddress)
-        // 1. Query Signal session for bobAddress
-        // 2. If bobAddress starts with "05" (raw curve25519) → use nostr pubkey
-        // 3. If bobAddress is ratchet-derived → hash via generateSeedFromRatchetkeyPair
-        // 4. If dest == nostr pubkey and onetimekey exists → use onetimekey
+        // Determine destination address:
+        // 1. Cached my_sending_address (set during decrypt — most reliable)
+        // 2. Peer's onetimekey (first message after hello)
+        // 3. Peer's nostr pubkey (ultimate fallback)
         let mut dest_pubkey = nostr_pubkey.clone();
         let mut sending_to_onetimekey = false;
 
-// Priority 1: Use cached my_sending_address from DB (most reliable — set during decrypt)
         let cached_sending_addr = signal.get_my_sending_address(&nostr_pubkey).await.ok().flatten();
         if let Some(ref addr) = cached_sending_addr {
             log::info!("Using cached my_sending_address: {}", &addr[..16.min(addr.len())]);
             dest_pubkey = addr.clone();
-        } else {
-            // Fallback: derive from Signal session's bobAddress
-            let peer_recv_addr = if let Some(ref lsk) = local_signal_pubkey {
-                signal.get_peer_receiving_address_by_local_key(lsk, &signal_pubkey, device_id).await?
-            } else {
-                signal.get_peer_receiving_address(account, &signal_pubkey, device_id).await?
-            };
-
-            if let Some(ref bob_addr) = peer_recv_addr {
-                if bob_addr.starts_with("05") {
-                    log::info!("bobAddress is raw curve25519, using nostr pubkey");
-                    dest_pubkey = nostr_pubkey.clone();
-                } else {
-                    let derived = crate::signal::generate_seed_from_ratchetkey_pair(bob_addr)?;
-                    log::info!("Derived peer receiving address from bobAddress: {}", derived);
-                    dest_pubkey = derived;
-                }
-            }
-        }
-
-        // If destination is still the nostr pubkey and peer has onetimekey, use onetimekey
-        if dest_pubkey == nostr_pubkey {
-            if let Some(ref p) = peer {
-                if let Some(ref otk) = p.onetimekey {
-                    if !otk.is_empty() {
-                        dest_pubkey = otk.clone();
-                        sending_to_onetimekey = true;
-                        log::info!("Sending to peer's onetimekey: {}", otk);
-                    }
+        } else if let Some(ref p) = peer {
+            if let Some(ref otk) = p.onetimekey {
+                if !otk.is_empty() {
+                    dest_pubkey = otk.clone();
+                    sending_to_onetimekey = true;
+                    log::info!("Sending to peer's onetimekey: {}", otk);
                 }
             }
         }

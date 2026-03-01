@@ -563,29 +563,6 @@ impl SignalManager {
         Ok(session)
     }
 
-    /// Get the peer_recv_addr from a Signal session (for computing peer's receiving address).
-    pub async fn get_peer_receiving_address(
-        &self,
-        account: &KeychatAccount,
-        curve25519_pubkey: &str,
-        device_id: u32,
-    ) -> Result<Option<String>> {
-        let session = self.get_session(account, curve25519_pubkey, device_id).await?;
-        Ok(session.and_then(|s| s.bob_address))
-    }
-
-    /// Get peer_recv_addr using a specific local Signal store.
-    pub async fn get_peer_receiving_address_by_local_key(
-        &self,
-        local_signal_pubkey_hex: &str,
-        peer_signal_pubkey: &str,
-        device_id: u32,
-    ) -> Result<Option<String>> {
-        let session = self.get_session_by_local_key(local_signal_pubkey_hex, peer_signal_pubkey, device_id).await?;
-        Ok(session.and_then(|s| s.bob_address))
-    }
-
-
     /// Get all peer sessions from the DB.
     /// Returns Vec<(signal_pubkey, device_id_str)>
     pub async fn get_all_sessions_info(

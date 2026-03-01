@@ -1078,42 +1078,6 @@ impl BridgeState {
             }
         }
 
-        if let Some(ref addrs) = result.next_send_addrs {
-            response["next_send_addrs"] = serde_json::to_value(addrs)?;
-
-            // next_send_addrs from decrypt are the PEER's receiving addresses (= our sending destination).
-            // Derive the Nostr pubkey and save as my_sending_address in peer_mysendingaddress_mapping.
-            let peer_nostr = params.get("nostr_pubkey")
-                .and_then(|v| v.as_str())
-                .filter(|s| !s.is_empty())
-                .map(|s| s.to_string())
-                .or_else(|| {
-                    self.peers.values()
-                        .find(|p| p.curve25519_pk_hex == from_pubkey)
-                        .map(|p| p.nostr_pubkey.clone())
-                });
-
-            if let Some(ref nostr_pk) = peer_nostr {
-                // Only save the LAST derived address (most recent ratchet state)
-                let mut last_derived: Option<String> = None;
-                for raw_addr in addrs {
-                    match signal::generate_seed_from_ratchetkey_pair(raw_addr) {
-                        Ok(derived) => { last_derived = Some(derived); }
-                        Err(e) => log::warn!("Failed to derive address from ratchet key: {}", e),
-                    }
-                }
-                if let Some(derived) = last_derived {
-                    if let Err(e) = signal.save_my_sending_address(nostr_pk, &derived).await {
-                        log::warn!("Failed to persist my_sending_address: {}", e);
-                    } else {
-                        log::info!("Saved my_sending_address {} for peer {}", &derived[..16], &nostr_pk[..16]);
-                    }
-                }
-            } else {
-                log::warn!("Cannot persist next_send_addrs: peer_nostr is None");
-            }
-        }
-
         // Always update my_sending_address from session bobAddress after decrypt.
         // bobAddress is persisted by signal-storage's store_session on every decrypt,
         // so it always reflects the latest ratchet state.

@@ -1093,7 +1093,7 @@ impl BridgeState {
                         .map(|p| p.nostr_pubkey.clone())
                 });
 
-            if let (Some(ref sig), Some(ref nostr_pk)) = (self.signal.as_ref(), &peer_nostr) {
+            if let Some(ref nostr_pk) = peer_nostr {
                 // Only save the LAST derived address (most recent ratchet state)
                 let mut last_derived: Option<String> = None;
                 for raw_addr in addrs {
@@ -1103,14 +1103,14 @@ impl BridgeState {
                     }
                 }
                 if let Some(derived) = last_derived {
-                    if let Err(e) = sig.save_my_sending_address(nostr_pk, &derived).await {
+                    if let Err(e) = signal.save_my_sending_address(nostr_pk, &derived).await {
                         log::warn!("Failed to persist my_sending_address: {}", e);
                     } else {
                         log::info!("Saved my_sending_address {} for peer {}", &derived[..16], &nostr_pk[..16]);
                     }
                 }
             } else {
-                log::warn!("Cannot persist next_send_addrs: signal={} peer_nostr={:?}", self.signal.is_some(), peer_nostr.as_ref().map(|s| &s[..16.min(s.len())]));
+                log::warn!("Cannot persist next_send_addrs: peer_nostr is None");
             }
         }
 

@@ -563,6 +563,7 @@ impl SignalManager {
         Ok(session)
     }
 
+
     /// Get all peer sessions from the DB.
     /// Returns Vec<(signal_pubkey, device_id_str)>
     pub async fn get_all_sessions_info(
@@ -619,7 +620,7 @@ impl SignalManager {
 
         if old_exists {
             signal_store::sqlx::query(
-                "INSERT OR IGNORE INTO peer_mysendingaddress_mapping (nostr_pubkey, signal_pubkey, device_id, name, created_at) SELECT nostr_pubkey, signal_pubkey, device_id, name, created_at FROM peer_mapping"
+                "INSERT OR IGNORE INTO peer_mysendingaddress_mapping (nostr_pubkey, signal_pubkey, device_id, name, created_at, local_signal_pubkey, local_signal_privkey) SELECT nostr_pubkey, signal_pubkey, device_id, name, created_at, local_signal_pubkey, local_signal_privkey FROM peer_mapping"
             ).execute(self.pool.database()).await?;
             signal_store::sqlx::query("DROP TABLE peer_mapping")
                 .execute(self.pool.database()).await?;

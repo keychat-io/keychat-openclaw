@@ -152,6 +152,8 @@ impl BridgeState {
             "get_all_sessions" => self.handle_get_all_sessions().await,
             "get_peer_mappings" => self.handle_get_peer_mappings().await,
             "save_peer_mapping" => self.handle_save_peer_mapping(req.params).await,
+            "delete_peer_mapping" => self.handle_delete_peer_mapping(req.params).await,
+            "cleanup_orphaned_sessions" => self.handle_cleanup_orphaned_sessions().await,
             "save_address_mapping" => self.handle_save_receiving_address(req.params).await,
             "get_address_mappings" => self.handle_get_receiving_addresses().await,
             "delete_address_mapping" => self.handle_delete_receiving_address(req.params).await,
@@ -483,6 +485,7 @@ impl BridgeState {
             "session_established": true,
             "peer_nostr_pubkey": qr_model.pubkey,
             "peer_signal_pubkey": qr_model.curve25519_pk_hex,
+            "local_signal_pubkey": local_sig_pk,
             "peer_name": qr_model.name,
             "peer_onetimekey": if qr_model.onetimekey.is_empty() { None } else { Some(&qr_model.onetimekey) },
             "device_id": device_id,
@@ -777,8 +780,11 @@ impl BridgeState {
         } else {
             // Check if text is already a KeychatMessage JSON (e.g. from sendGroupMessage).
             // If so, pass through without double-wrapping.
+            // Only pass through group messages without wrapping — they are the only
+            // legitimate internal caller.  User text that happens to parse as valid
+            // KeychatMessage JSON with c="signal" or c="nip04" must still be wrapped.
             let already_km = serde_json::from_str::<KeychatMessage>(&text).ok()
-                .filter(|km| km.c == "group" || km.c == "signal" || km.c == "nip04");
+                .filter(|km| km.c == "group");
             if let Some(_) = already_km {
                 log::info!("Text is already a KeychatMessage (type={}), passing through", serde_json::from_str::<KeychatMessage>(&text).unwrap().msg_type);
                 text.clone()
@@ -1414,6 +1420,28 @@ impl BridgeState {
             .map(|v| v as u32);
         signal.delete_session(account, signal_pubkey, device_id).await?;
         Ok(serde_json::json!({"deleted": true}))
+    }
+
+    /// Delete a peer mapping by nostr pubkey.
+    /// Params: { nostr_pubkey: string }
+    async fn handle_delete_peer_mapping(&mut self, params: serde_json::Value) -> Result<serde_json::Value> {
+        let signal = self.signal.as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Signal not initialized"))?;
+        let nostr_pubkey = params.get("nostr_pubkey").and_then(|v| v.as_str())
+            .ok_or_else(|| anyhow::anyhow!("nostr_pubkey required"))?;
+        signal.delete_peer_mapping(nostr_pubkey).await?;
+        self.peers.remove(nostr_pubkey);
+        log::info!("Deleted peer mapping for {}", &nostr_pubkey[..16.min(nostr_pubkey.len())]);
+        Ok(serde_json::json!({"deleted": true}))
+    }
+
+    /// Clean up orphaned session rows that have no corresponding peer_mapping entry.
+    async fn handle_cleanup_orphaned_sessions(&mut self) -> Result<serde_json::Value> {
+        let signal = self.signal.as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Signal not initialized"))?;
+        let deleted = signal.cleanup_orphaned_sessions().await?;
+        log::info!("Cleaned up {} orphaned session row(s)", deleted);
+        Ok(serde_json::json!({"deleted_count": deleted}))
     }
 
     // -----------------------------------------------------------------------

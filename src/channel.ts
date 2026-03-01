@@ -1447,6 +1447,16 @@ export const keychatPlugin: ChannelPlugin<ResolvedKeychatAccount> = {
         console.error(`[keychat] [${account.accountId}] Failed to restore sessions from DB:`, err);
       }
 
+      // 7c. Clean up orphaned Signal session rows (no matching peer_mapping)
+      try {
+        const cleanup = await bridge.cleanupOrphanedSessions();
+        if (cleanup.deleted_count > 0) {
+          ctx.log?.info(`[${account.accountId}] Cleaned up ${cleanup.deleted_count} orphaned session row(s)`);
+        }
+      } catch (err) {
+        console.error(`[keychat] [${account.accountId}] Failed to clean up orphaned sessions:`, err);
+      }
+
       // 8. Restore groups from DB
       try {
         const { groups } = await bridge.getAllGroups();
@@ -1760,6 +1770,7 @@ async function handleFriendRequestInner(
     deviceId: hello.device_id,
     name: hello.peer_name,
     nostrPubkey: hello.peer_nostr_pubkey,
+    localSignalPubkey: hello.local_signal_pubkey,
   };
 
   // Clean up only the legacy restore entry for THIS peer's signal pubkey (if it was keyed wrong)
@@ -3211,6 +3222,14 @@ export async function resetPeerSession(
     } catch (err) {
       console.error(`[keychat] [${accountId}] Failed to delete Signal session: ${err}`);
     }
+  }
+
+  // 2b. Delete peer_mapping DB row so it doesn't resurrect on restart
+  try {
+    await bridge.deletePeerMapping(normalizedPeer);
+    console.log(`[keychat] [${accountId}] Deleted peer_mapping for ${normalizedPeer}`);
+  } catch (err) {
+    console.error(`[keychat] [${accountId}] Failed to delete peer_mapping: ${err}`);
   }
 
   // 3. Clear in-memory maps

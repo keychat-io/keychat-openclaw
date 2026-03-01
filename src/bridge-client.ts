@@ -478,6 +478,11 @@ export class KeychatBridgeClient {
     return (await this.call("save_peer_mapping", { nostr_pubkey: nostrPubkey, signal_pubkey: signalPubkey, device_id: deviceId, name })) as any;
   }
 
+  /** Delete a peer mapping by nostr pubkey. */
+  async deletePeerMapping(nostrPubkey: string): Promise<{ deleted: boolean }> {
+    return (await this.call("delete_peer_mapping", { nostr_pubkey: nostrPubkey })) as any;
+  }
+
   /** Mark an event as processed (persisted to DB). */
   async markEventProcessed(eventId: string, createdAt?: number): Promise<{ marked: boolean }> {
     return (await this.call("mark_event_processed", { event_id: eventId, created_at: createdAt })) as any;
@@ -649,6 +654,11 @@ export class KeychatBridgeClient {
   /** Delete a Signal session for a peer. */
   async deleteSession(signalPubkey: string, deviceId?: number): Promise<{ deleted: boolean }> {
     return (await this.call("delete_session", { signal_pubkey: signalPubkey, device_id: deviceId })) as any;
+  }
+
+  /** Clean up orphaned session rows with no matching peer_mapping entry. */
+  async cleanupOrphanedSessions(): Promise<{ deleted_count: number }> {
+    return (await this.call("cleanup_orphaned_sessions", {})) as any;
   }
 
   /** Sign a Blossom (kind:24242) Nostr event for media upload auth. */

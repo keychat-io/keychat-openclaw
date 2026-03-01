@@ -858,6 +858,16 @@ impl SignalManager {
         Ok(())
     }
 
+    /// Delete orphaned session rows whose address is not in any peer_mapping.signal_pubkey.
+    pub async fn cleanup_orphaned_sessions(&self) -> Result<u64> {
+        let result = signal_store::sqlx::query(
+            "DELETE FROM session WHERE address NOT IN (SELECT signal_pubkey FROM peer_mapping WHERE signal_pubkey != '')"
+        )
+            .execute(self.pool.database())
+            .await?;
+        Ok(result.rows_affected())
+    }
+
     // -----------------------------------------------------------------------
     // Address-to-peer mapping persistence
     // -----------------------------------------------------------------------

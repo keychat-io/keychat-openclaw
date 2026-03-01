@@ -106,17 +106,11 @@ export class KeychatBridgeClient {
   private signalDbPath: string | null = null;
 
   constructor(bridgePath?: string) {
-    // Default: look for the binary relative to the extension directory
-    this.bridgePath =
-      bridgePath ??
-      join(
-        import.meta.dirname ?? __dirname,
-        "..",
-        "bridge",
-        "target",
-        "release",
-        "keychat-openclaw",
-      );
+    // Default: prefer published binary (keychat-bridge), fallback to dev build path
+    const baseDir = import.meta.dirname ?? __dirname;
+    const publishedBinary = join(baseDir, "..", "keychat-bridge");
+    const devBinary = join(baseDir, "..", "bridge", "target", "release", "keychat-openclaw");
+    this.bridgePath = bridgePath ?? (existsSync(publishedBinary) ? publishedBinary : devBinary);
   }
 
   /** Start the bridge sidecar process. */

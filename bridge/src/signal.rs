@@ -618,9 +618,23 @@ impl SignalManager {
     // -----------------------------------------------------------------------
 
     async fn ensure_peer_table(&self) -> Result<()> {
-        // Always create the new table with full schema (CREATE TABLE AS SELECT loses constraints)
+        // Rename old table if it exists (was temporarily named peer_mysendingaddress_mapping)
+        let old_name_exists: bool = signal_store::sqlx::query(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='peer_mysendingaddress_mapping'"
+        )
+        .fetch_optional(self.pool.database())
+        .await?
+        .is_some();
+
+        if old_name_exists {
+            signal_store::sqlx::query("ALTER TABLE peer_mysendingaddress_mapping RENAME TO peer_mapping")
+                .execute(self.pool.database()).await?;
+            log::info!("Renamed peer_mysendingaddress_mapping → peer_mapping");
+        }
+
+        // Create table if not exists
         signal_store::sqlx::query(
-            "CREATE TABLE IF NOT EXISTS peer_mysendingaddress_mapping (
+            "CREATE TABLE IF NOT EXISTS peer_mapping (
                 nostr_pubkey TEXT PRIMARY KEY,
                 signal_pubkey TEXT NOT NULL,
                 device_id INTEGER NOT NULL,
@@ -630,38 +644,21 @@ impl SignalManager {
         )
         .execute(self.pool.database())
         .await?;
-
-        // Migrate data from old table if it exists
-        let old_exists: bool = signal_store::sqlx::query(
-            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='peer_mapping'"
-        )
-        .fetch_optional(self.pool.database())
-        .await?
-        .is_some();
-
-        if old_exists {
-            signal_store::sqlx::query(
-                "INSERT OR IGNORE INTO peer_mysendingaddress_mapping (nostr_pubkey, signal_pubkey, device_id, name, created_at, local_signal_pubkey, local_signal_privkey) SELECT nostr_pubkey, signal_pubkey, device_id, name, created_at, local_signal_pubkey, local_signal_privkey FROM peer_mapping"
-            ).execute(self.pool.database()).await?;
-            signal_store::sqlx::query("DROP TABLE peer_mapping")
-                .execute(self.pool.database()).await?;
-            log::info!("Migrated peer_mapping → peer_mysendingaddress_mapping");
-        }
         // Add columns if missing (migration for existing DBs)
         let _ = signal_store::sqlx::query(
-            "ALTER TABLE peer_mysendingaddress_mapping ADD COLUMN local_signal_pubkey TEXT"
+            "ALTER TABLE peer_mapping ADD COLUMN local_signal_pubkey TEXT"
         ).execute(self.pool.database()).await;
         let _ = signal_store::sqlx::query(
-            "ALTER TABLE peer_mysendingaddress_mapping ADD COLUMN local_signal_privkey TEXT"
+            "ALTER TABLE peer_mapping ADD COLUMN local_signal_privkey TEXT"
         ).execute(self.pool.database()).await;
         let _ = signal_store::sqlx::query(
-            "ALTER TABLE peer_mysendingaddress_mapping ADD COLUMN signed_prekey_id INTEGER"
+            "ALTER TABLE peer_mapping ADD COLUMN signed_prekey_id INTEGER"
         ).execute(self.pool.database()).await;
         let _ = signal_store::sqlx::query(
-            "ALTER TABLE peer_mysendingaddress_mapping ADD COLUMN onetimekey TEXT"
+            "ALTER TABLE peer_mapping ADD COLUMN onetimekey TEXT"
         ).execute(self.pool.database()).await;
         let _ = signal_store::sqlx::query(
-            "ALTER TABLE peer_mysendingaddress_mapping ADD COLUMN my_sending_address TEXT"
+            "ALTER TABLE peer_mapping ADD COLUMN my_sending_address TEXT"
         ).execute(self.pool.database()).await;
         Ok(())
     }
@@ -676,7 +673,7 @@ impl SignalManager {
         // Preserve any previously saved local (ephemeral) Signal keypair for this peer.
         // This avoids wiping the local store mapping when TS updates only remote metadata.
         let existing = signal_store::sqlx::query(
-            "SELECT local_signal_pubkey, local_signal_privkey FROM peer_mysendingaddress_mapping WHERE nostr_pubkey = ?"
+            "SELECT local_signal_pubkey, local_signal_privkey FROM peer_mapping WHERE nostr_pubkey = ?"
         )
         .bind(nostr_pubkey)
         .fetch_optional(self.pool.database())
@@ -750,7 +747,7 @@ impl SignalManager {
             .duration_since(std::time::UNIX_EPOCH)?
             .as_secs() as i64;
         signal_store::sqlx::query(
-            "INSERT OR REPLACE INTO peer_mysendingaddress_mapping (nostr_pubkey, signal_pubkey, device_id, name, created_at, local_signal_pubkey, local_signal_privkey, signed_prekey_id, onetimekey) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
+            "INSERT OR REPLACE INTO peer_mapping (nostr_pubkey, signal_pubkey, device_id, name, created_at, local_signal_pubkey, local_signal_privkey, signed_prekey_id, onetimekey) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
         )
         .bind(nostr_pubkey)
         .bind(signal_pubkey)
@@ -769,7 +766,7 @@ impl SignalManager {
     /// Look up peer nostr pubkey by signed_prekey_id (used to identify PreKey message sender).
     pub async fn lookup_peer_by_signed_prekey_id(&self, spk_id: u32) -> Result<Option<String>> {
         let row = signal_store::sqlx::query(
-            "SELECT nostr_pubkey FROM peer_mysendingaddress_mapping WHERE signed_prekey_id = ? LIMIT 1"
+            "SELECT nostr_pubkey FROM peer_mapping WHERE signed_prekey_id = ? LIMIT 1"
         )
         .bind(spk_id as i64)
         .fetch_optional(self.pool.database())
@@ -784,7 +781,7 @@ impl SignalManager {
     /// Keeps nostr_pubkey ↔ signal_pubkey mapping for routing.
     pub async fn clear_prekey_material(&self, nostr_pubkey: &str) -> Result<()> {
         signal_store::sqlx::query(
-            "UPDATE peer_mysendingaddress_mapping SET local_signal_pubkey = NULL, local_signal_privkey = NULL, signed_prekey_id = NULL WHERE nostr_pubkey = ?"
+            "UPDATE peer_mapping SET local_signal_pubkey = NULL, local_signal_privkey = NULL, signed_prekey_id = NULL WHERE nostr_pubkey = ?"
         )
         .bind(nostr_pubkey)
         .execute(self.pool.database())
@@ -806,7 +803,7 @@ impl SignalManager {
     /// Look up a single peer mapping by nostr pubkey (avoids full table scan).
     pub async fn get_peer_mapping_by_nostr_pubkey(&self, nostr_pubkey: &str) -> Result<Option<(String, String, i64, String, Option<String>, Option<String>, Option<String>)>> {
         let row = signal_store::sqlx::query(
-            "SELECT nostr_pubkey, signal_pubkey, device_id, name, local_signal_pubkey, local_signal_privkey, onetimekey FROM peer_mysendingaddress_mapping WHERE nostr_pubkey = ?"
+            "SELECT nostr_pubkey, signal_pubkey, device_id, name, local_signal_pubkey, local_signal_privkey, onetimekey FROM peer_mapping WHERE nostr_pubkey = ?"
         )
         .bind(nostr_pubkey)
         .fetch_optional(self.pool.database())
@@ -825,7 +822,7 @@ impl SignalManager {
 
     pub async fn get_all_peer_mappings_full(&self) -> Result<Vec<(String, String, i64, String, Option<String>, Option<String>, Option<String>)>> {
         let rows = signal_store::sqlx::query(
-            "SELECT nostr_pubkey, signal_pubkey, device_id, name, local_signal_pubkey, local_signal_privkey, onetimekey FROM peer_mysendingaddress_mapping ORDER BY created_at"
+            "SELECT nostr_pubkey, signal_pubkey, device_id, name, local_signal_pubkey, local_signal_privkey, onetimekey FROM peer_mapping ORDER BY created_at"
         )
         .fetch_all(self.pool.database())
         .await?;
@@ -845,7 +842,7 @@ impl SignalManager {
 
     /// Clear onetimekey from DB after it's been used (one-time use).
     pub async fn clear_onetimekey(&self, nostr_pubkey: &str) -> Result<()> {
-        signal_store::sqlx::query("UPDATE peer_mysendingaddress_mapping SET onetimekey = NULL WHERE nostr_pubkey = ?")
+        signal_store::sqlx::query("UPDATE peer_mapping SET onetimekey = NULL WHERE nostr_pubkey = ?")
             .bind(nostr_pubkey)
             .execute(self.pool.database())
             .await?;
@@ -853,7 +850,7 @@ impl SignalManager {
     }
 
     pub async fn delete_peer_mapping(&self, nostr_pubkey: &str) -> Result<()> {
-        signal_store::sqlx::query("DELETE FROM peer_mysendingaddress_mapping WHERE nostr_pubkey = ?")
+        signal_store::sqlx::query("DELETE FROM peer_mapping WHERE nostr_pubkey = ?")
             .bind(nostr_pubkey)
             .execute(self.pool.database())
             .await?;
@@ -936,7 +933,7 @@ impl SignalManager {
     /// Get the cached my_sending_address for a peer.
     pub async fn get_my_sending_address(&self, nostr_pubkey: &str) -> Result<Option<String>> {
         let row: Option<(String,)> = signal_store::sqlx::query_as(
-            "SELECT my_sending_address FROM peer_mysendingaddress_mapping WHERE nostr_pubkey = ? AND my_sending_address IS NOT NULL"
+            "SELECT my_sending_address FROM peer_mapping WHERE nostr_pubkey = ? AND my_sending_address IS NOT NULL"
         )
         .bind(nostr_pubkey)
         .fetch_optional(self.pool.database())
@@ -944,10 +941,10 @@ impl SignalManager {
         Ok(row.map(|r| r.0))
     }
 
-    /// Update the my_sending_address column for a peer in peer_mysendingaddress_mapping.
+    /// Update the my_sending_address column for a peer in peer_mapping.
     pub async fn save_my_sending_address(&self, nostr_pubkey: &str, address: &str) -> Result<()> {
         signal_store::sqlx::query(
-            "UPDATE peer_mysendingaddress_mapping SET my_sending_address = ? WHERE nostr_pubkey = ?"
+            "UPDATE peer_mapping SET my_sending_address = ? WHERE nostr_pubkey = ?"
         )
         .bind(address)
         .bind(nostr_pubkey)

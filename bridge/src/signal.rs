@@ -596,7 +596,20 @@ impl SignalManager {
     // -----------------------------------------------------------------------
 
     async fn ensure_peer_table(&self) -> Result<()> {
-        // Migrate from old table name if it exists
+        // Always create the new table with full schema (CREATE TABLE AS SELECT loses constraints)
+        signal_store::sqlx::query(
+            "CREATE TABLE IF NOT EXISTS peer_mysendingaddress_mapping (
+                nostr_pubkey TEXT PRIMARY KEY,
+                signal_pubkey TEXT NOT NULL,
+                device_id INTEGER NOT NULL,
+                name TEXT NOT NULL DEFAULT '',
+                created_at INTEGER NOT NULL
+            )"
+        )
+        .execute(self.pool.database())
+        .await?;
+
+        // Migrate data from old table if it exists
         let old_exists: bool = signal_store::sqlx::query(
             "SELECT 1 FROM sqlite_master WHERE type='table' AND name='peer_mapping'"
         )
@@ -606,23 +619,11 @@ impl SignalManager {
 
         if old_exists {
             signal_store::sqlx::query(
-                "CREATE TABLE IF NOT EXISTS peer_mysendingaddress_mapping AS SELECT * FROM peer_mapping"
+                "INSERT OR IGNORE INTO peer_mysendingaddress_mapping (nostr_pubkey, signal_pubkey, device_id, name, created_at) SELECT nostr_pubkey, signal_pubkey, device_id, name, created_at FROM peer_mapping"
             ).execute(self.pool.database()).await?;
-            signal_store::sqlx::query("DROP TABLE IF EXISTS peer_mapping")
+            signal_store::sqlx::query("DROP TABLE peer_mapping")
                 .execute(self.pool.database()).await?;
             log::info!("Migrated peer_mapping → peer_mysendingaddress_mapping");
-        } else {
-            signal_store::sqlx::query(
-                "CREATE TABLE IF NOT EXISTS peer_mysendingaddress_mapping (
-                    nostr_pubkey TEXT PRIMARY KEY,
-                    signal_pubkey TEXT NOT NULL,
-                    device_id INTEGER NOT NULL,
-                    name TEXT NOT NULL DEFAULT '',
-                    created_at INTEGER NOT NULL
-                )"
-            )
-            .execute(self.pool.database())
-            .await?;
         }
         // Add columns if missing (migration for existing DBs)
         let _ = signal_store::sqlx::query(
@@ -842,7 +843,18 @@ impl SignalManager {
     // -----------------------------------------------------------------------
 
     async fn ensure_receiving_addresses_table(&self) -> Result<()> {
-        // Migrate from old table name if it exists
+        // Always create the new table with full schema (CREATE TABLE AS SELECT loses constraints)
+        signal_store::sqlx::query(
+            "CREATE TABLE IF NOT EXISTS myreceivingaddresses_peer_mapping (
+                address TEXT PRIMARY KEY,
+                peer_nostr_pubkey TEXT NOT NULL,
+                created_at INTEGER NOT NULL
+            )"
+        )
+        .execute(self.pool.database())
+        .await?;
+
+        // Migrate data from old table if it exists
         let old_exists: bool = signal_store::sqlx::query(
             "SELECT 1 FROM sqlite_master WHERE type='table' AND name='address_peer_mapping'"
         )
@@ -852,21 +864,11 @@ impl SignalManager {
 
         if old_exists {
             signal_store::sqlx::query(
-                "CREATE TABLE IF NOT EXISTS myreceivingaddresses_peer_mapping AS SELECT * FROM address_peer_mapping"
+                "INSERT OR IGNORE INTO myreceivingaddresses_peer_mapping SELECT * FROM address_peer_mapping"
             ).execute(self.pool.database()).await?;
-            signal_store::sqlx::query("DROP TABLE IF EXISTS address_peer_mapping")
+            signal_store::sqlx::query("DROP TABLE address_peer_mapping")
                 .execute(self.pool.database()).await?;
             log::info!("Migrated address_peer_mapping → myreceivingaddresses_peer_mapping");
-        } else {
-            signal_store::sqlx::query(
-                "CREATE TABLE IF NOT EXISTS myreceivingaddresses_peer_mapping (
-                    address TEXT PRIMARY KEY,
-                    peer_nostr_pubkey TEXT NOT NULL,
-                    created_at INTEGER NOT NULL
-                )"
-            )
-            .execute(self.pool.database())
-            .await?;
         }
         Ok(())
     }

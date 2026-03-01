@@ -27,8 +27,8 @@ pub struct InboundMessage {
     pub encrypted_content: String,
     /// Which kind of event (4 = NIP-04, 1059 = Gift Wrap)
     pub event_kind: u16,
-    /// The `p` tag recipient address (for kind:4, identifies which receiving address was targeted)
-    pub to_address: Option<String>,
+    /// The `p` tag recipient address (which inbox this arrived at)
+    pub arrived_at: Option<String>,
     /// Whether the content was already decrypted (e.g., NIP-04 group invite)
     #[serde(default)]
     pub nip04_decrypted: bool,
@@ -221,7 +221,7 @@ impl NostrTransport {
         let ephemeral_sender = event.pubkey.to_string();
 
         // Extract the `p` tag to identify which receiving address this was sent to
-        let to_address = event.tags.iter().find_map(|tag| {
+        let arrived_at = event.tags.iter().find_map(|tag| {
             let values: Vec<&str> = tag.as_slice().iter().map(|s| s.as_str()).collect();
             if values.len() >= 2 && values[0] == "p" {
                 Some(values[1].to_string())
@@ -259,7 +259,7 @@ impl NostrTransport {
         log::info!(
             "Keychat DM from ephemeral {} → to {} (prekey: {}, {} bytes)",
             &ephemeral_sender[..16],
-            to_address.as_deref().unwrap_or("unknown"),
+            arrived_at.as_deref().unwrap_or("unknown"),
             is_prekey,
             content.len(),
         );
@@ -272,7 +272,7 @@ impl NostrTransport {
             is_prekey,
             encrypted_content: content, // raw base64 Signal ciphertext, or NIP-04 decrypted plaintext
             event_kind: 4,
-            to_address,
+            arrived_at,
             nip04_decrypted,
             inner_kind: None, inner_tags_p: vec![],
         };
@@ -291,8 +291,8 @@ impl NostrTransport {
         our_secret: &SecretKey,
         inbound_tx: &mpsc::UnboundedSender<InboundMessage>,
     ) {
-        // Extract p-tag (to_address) from the outer event
-        let to_address = event.tags.iter().find_map(|tag| {
+        // Extract p-tag (arrived_at) from the outer event
+        let arrived_at = event.tags.iter().find_map(|tag| {
             let values: Vec<&str> = tag.as_slice().iter().map(|s| s.as_str()).collect();
             if values.len() >= 2 && values[0] == "p" {
                 Some(values[1].to_string())
@@ -310,7 +310,7 @@ impl NostrTransport {
                 log::info!(
                     "Kind:1059 event {} not a Gift Wrap (to: {}), passing as MLS candidate",
                     event.id,
-                    to_address.as_deref().unwrap_or("unknown"),
+                    arrived_at.as_deref().unwrap_or("unknown"),
                 );
                 let msg = InboundMessage {
                     from_pubkey: event.pubkey.to_string(),
@@ -320,7 +320,7 @@ impl NostrTransport {
                     is_prekey: false,
                     encrypted_content: event.content.clone(),
                     event_kind: 1059,
-                    to_address,
+                    arrived_at,
                     nip04_decrypted: false,
                     inner_kind: None, // Not a Gift Wrap — raw MLS content
                     inner_tags_p: vec![],
@@ -410,7 +410,7 @@ impl NostrTransport {
             is_prekey: false,
             encrypted_content: content.to_string(),
             event_kind: 1059,
-            to_address,
+            arrived_at,
             nip04_decrypted: false,
             inner_kind: Some(kind),
             inner_tags_p,

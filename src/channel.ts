@@ -433,10 +433,10 @@ class FriendRequestManager {
     // curve25519 identity pubkey is NOT a receiving address; subscribing to it
     // causes routing conflicts when multiple hellos are in flight.
     const handshakeAddresses = new Set<string>();
-    if (helloResult.onetimekey) {
-      handshakeAddresses.add(helloResult.onetimekey);
-      getAddressToPeer(accountId).set(helloResult.onetimekey, peerPubkey);
-      try { await bridge.saveReceivingAddress(helloResult.onetimekey, peerPubkey); } catch { /* best effort */ }
+    if (helloResult.peer_first_inbox) {
+      handshakeAddresses.add(helloResult.peer_first_inbox);
+      getAddressToPeer(accountId).set(helloResult.peer_first_inbox, peerPubkey);
+      try { await bridge.saveReceivingAddress(helloResult.peer_first_inbox, peerPubkey); } catch { /* best effort */ }
     }
     if (handshakeAddresses.size > 0) {
       await bridge.addSubscription(Array.from(handshakeAddresses));
@@ -914,7 +914,7 @@ export const keychatPlugin: ChannelPlugin<ResolvedKeychatAccount> = {
           // Handle receiving address rotation for each group member
           if (result.member_rotations?.length) {
             for (const rot of result.member_rotations) {
-              await handleReceivingAddressRotation(bridge, aid, { new_receiving_address: rot.new_receiving_address } as any, rot.member);
+              await handleReceivingAddressRotation(bridge, aid, { my_new_inbox: rot.my_new_inbox } as any, rot.member);
             }
           }
           return {
@@ -1063,7 +1063,7 @@ export const keychatPlugin: ChannelPlugin<ResolvedKeychatAccount> = {
           const result = await retrySend(() => bridge.sendGroupMessage(groupId, messageText));
           if (result.member_rotations?.length) {
             for (const rot of result.member_rotations) {
-              await handleReceivingAddressRotation(bridge, aid, { new_receiving_address: rot.new_receiving_address } as any, rot.member);
+              await handleReceivingAddressRotation(bridge, aid, { my_new_inbox: rot.my_new_inbox } as any, rot.member);
             }
           }
           return {
@@ -1386,13 +1386,13 @@ export const keychatPlugin: ChannelPlugin<ResolvedKeychatAccount> = {
           ctx.log?.info(`[${account.accountId}] Restored ${mappings.length} peer mapping(s) from DB`);
           for (const m of mappings) {
             // Skip placeholder rows created by outgoing hello before reply arrives
-            if (!m.signal_pubkey) continue;
+            if (!m.peer_signal_key) continue;
             getPeerSessions(account.accountId).set(m.nostr_pubkey, {
-              signalPubkey: m.signal_pubkey,
+              signalPubkey: m.peer_signal_key,
               deviceId: m.device_id,
               name: m.name,
               nostrPubkey: m.nostr_pubkey,
-              localSignalPubkey: m.local_signal_pubkey,
+              localSignalPubkey: m.my_signal_key,
             });
             friendRequestManager.setSessionEstablished(account.accountId, m.nostr_pubkey);
           }
@@ -1545,9 +1545,9 @@ export const keychatPlugin: ChannelPlugin<ResolvedKeychatAccount> = {
           // Restore peer mappings
           const { mappings } = await bridge.getPeerMappings();
           for (const m of mappings) {
-            if (!m.signal_pubkey) continue;
+            if (!m.peer_signal_key) continue;
             getPeerSessions(account.accountId).set(m.nostr_pubkey, {
-              signalPubkey: m.signal_pubkey,
+              signalPubkey: m.peer_signal_key,
               deviceId: m.device_id,
               name: m.name,
               nostrPubkey: m.nostr_pubkey,
@@ -1591,7 +1591,7 @@ export const keychatPlugin: ChannelPlugin<ResolvedKeychatAccount> = {
       // Set up inbound message handler
       bridge.setInboundHandler(async (msg: InboundMessage) => {
         try {
-          ctx.log?.info(`[${account.accountId}] ▶ Inbound handler invoked: kind=${msg.event_kind} from=${msg.from_pubkey?.slice(0,16)} to=${msg.to_address?.slice(0,16)} prekey=${msg.is_prekey} event=${msg.event_id?.slice(0,16)}`);
+          ctx.log?.info(`[${account.accountId}] ▶ Inbound handler invoked: kind=${msg.event_kind} from=${msg.from_pubkey?.slice(0,16)} to=${msg.arrived_at?.slice(0,16)} prekey=${msg.is_prekey} event=${msg.event_id?.slice(0,16)}`);
           // Deduplicate events — check in-memory first, then DB
           if (msg.event_id) {
             if (getSeenEventIds(account.accountId).has(msg.event_id)) {
@@ -1612,9 +1612,9 @@ export const keychatPlugin: ChannelPlugin<ResolvedKeychatAccount> = {
           if (msg.event_kind === 1059) {
             markProcessed(bridge, account.accountId, msg.event_id, msg.created_at);
 
-            // Check if this is an MLS group message (to_address matches a known listen key)
-            const mlsGroupId = msg.to_address ? mlsListenKeyToGroup.get(msg.to_address) : undefined;
-            ctx.log?.info(`[${account.accountId}] Kind:1059 routing: to_address=${msg.to_address ?? 'null'}, inner_kind=${msg.inner_kind ?? 'null'}, mlsGroupId=${mlsGroupId ?? 'null'}, mlsKeys=[${[...mlsListenKeyToGroup.keys()].map(k => k.slice(0, 12)).join(',')}]`);
+            // Check if this is an MLS group message (arrived_at matches a known listen key)
+            const mlsGroupId = msg.arrived_at ? mlsListenKeyToGroup.get(msg.arrived_at) : undefined;
+            ctx.log?.info(`[${account.accountId}] Kind:1059 routing: arrived_at=${msg.arrived_at ?? 'null'}, inner_kind=${msg.inner_kind ?? 'null'}, mlsGroupId=${mlsGroupId ?? 'null'}, mlsKeys=[${[...mlsListenKeyToGroup.keys()].map(k => k.slice(0, 12)).join(',')}]`);
 
             if (mlsGroupId && !msg.inner_kind) {
               // ── MLS group message (raw kind:1059, not Gift Wrap) ──
@@ -1761,27 +1761,27 @@ async function handleFriendRequestInner(
   }
 
   ctx.log?.info(
-    `[${accountId}] Session established with peer ${hello.peer_nostr_pubkey.slice(0,16)}... (signal: ${hello.peer_signal_pubkey.slice(0,16)}...)`,
+    `[${accountId}] Session established with peer ${hello.peer_nostr_pubkey.slice(0,16)}... (signal: ${hello.peer_signal_key.slice(0,16)}...)`,
   );
 
   // Store/update peer session info for this specific nostr pubkey only
   const peer: PeerSession = {
-    signalPubkey: hello.peer_signal_pubkey,
+    signalPubkey: hello.peer_signal_key,
     deviceId: hello.device_id,
     name: hello.peer_name,
     nostrPubkey: hello.peer_nostr_pubkey,
-    localSignalPubkey: hello.local_signal_pubkey,
+    localSignalPubkey: hello.my_signal_key,
   };
 
   // Clean up only the legacy restore entry for THIS peer's signal pubkey (if it was keyed wrong)
-  if (getPeerSessions(accountId).has(hello.peer_signal_pubkey) && hello.peer_signal_pubkey !== hello.peer_nostr_pubkey) {
-    getPeerSessions(accountId).delete(hello.peer_signal_pubkey);
-    ctx.log?.info(`[${accountId}] Cleaned up legacy signal-keyed entry: ${hello.peer_signal_pubkey}`);
+  if (getPeerSessions(accountId).has(hello.peer_signal_key) && hello.peer_signal_key !== hello.peer_nostr_pubkey) {
+    getPeerSessions(accountId).delete(hello.peer_signal_key);
+    ctx.log?.info(`[${accountId}] Cleaned up legacy signal-keyed entry: ${hello.peer_signal_key}`);
   }
 
   // Update getAddressToPeer entries that pointed to the old signal key to use nostr key
   for (const [addr, oldPeerKey] of getAddressToPeer(accountId)) {
-    if (oldPeerKey === hello.peer_signal_pubkey) {
+    if (oldPeerKey === hello.peer_signal_key) {
       getAddressToPeer(accountId).set(addr, hello.peer_nostr_pubkey);
     }
   }
@@ -1792,7 +1792,7 @@ async function handleFriendRequestInner(
   friendRequestManager.setSessionEstablished(accountId, hello.peer_nostr_pubkey);
 
   // NOTE: peer mapping already persisted by Rust handle_process_hello (with local Signal keys).
-  // Do NOT call savePeerMapping here — it would overwrite local_signal_pubkey/privkey with NULL.
+  // Do NOT call savePeerMapping here — it would overwrite my_signal_key/privkey with NULL.
 
   // Protocol Step 3: Receiver sends accept-first as kind:4 PreKey to initiator onetimekey.
   if (isPairingPending) {
@@ -1910,7 +1910,7 @@ async function handleNip04Message(
         const ghResult = await bridge.sendGroupMessage(joinResult.group_id, helloText, { subtype: 14 });
         if (ghResult.member_rotations?.length) {
           for (const rot of ghResult.member_rotations) {
-            await handleReceivingAddressRotation(bridge, accountId, { new_receiving_address: rot.new_receiving_address } as any, rot.member);
+            await handleReceivingAddressRotation(bridge, accountId, { my_new_inbox: rot.my_new_inbox } as any, rot.member);
           }
         }
         ctx.log?.info(`[${accountId}] Sent group hello to ${joinResult.group_id}`);
@@ -2042,7 +2042,7 @@ async function handleMlsGroupMessage(
         ctx.log?.info(`[${accountId}] MLS commit: ${commitResult.commit_type} by ${commitResult.sender.slice(0, 12)} in group ${groupId}`);
 
         // Update listen key subscription
-        const oldListenKey = msg.to_address;
+        const oldListenKey = msg.arrived_at;
         if (oldListenKey && oldListenKey !== commitResult.listen_key) {
           mlsListenKeyToGroup.delete(oldListenKey);
           getAddressToPeer(accountId).delete(oldListenKey);
@@ -2313,18 +2313,18 @@ async function handleEncryptedDM(
   runtime: ReturnType<typeof getKeychatRuntime>,
 ): Promise<void> {
   // kind:4 is published from an ephemeral event key, so from_pubkey is not a stable peer identifier.
-  // to_address is authoritative because it is our subscribed receiving address used for routing.
-  // Resolve by to_address first from in-memory map, then DB mapping cache.
+  // arrived_at is authoritative because it is our subscribed receiving address used for routing.
+  // Resolve by arrived_at first from in-memory map, then DB mapping cache.
   let peerNostrPubkey: string | null = null;
-  if (msg.to_address) {
-    peerNostrPubkey = getAddressToPeer(accountId).get(msg.to_address) ?? null;
+  if (msg.arrived_at) {
+    peerNostrPubkey = getAddressToPeer(accountId).get(msg.arrived_at) ?? null;
     if (!peerNostrPubkey) {
       try {
         const { mappings: dbMappings } = await bridge.getReceivingAddresses();
-        const found = dbMappings.find((m) => m.address === msg.to_address);
+        const found = dbMappings.find((m) => m.address === msg.arrived_at);
         if (found) {
           peerNostrPubkey = found.peer_nostr_pubkey;
-          getAddressToPeer(accountId).set(msg.to_address, peerNostrPubkey);
+          getAddressToPeer(accountId).set(msg.arrived_at, peerNostrPubkey);
           ctx.log?.info(`[${accountId}] Resolved peer from DB address mapping: ${peerNostrPubkey}`);
         }
       } catch { /* best effort */ }
@@ -2334,7 +2334,7 @@ async function handleEncryptedDM(
   // Protocol Step 3: accept-first arrives on A_onetimekey as a kind:4 PreKey message.
   // Only this path can establish a new session before normal routing metadata exists.
   const hasPeerSession = peerNostrPubkey ? getPeerSessions(accountId).has(peerNostrPubkey) : false;
-  ctx.log?.info(`[${accountId}] DEBUG: peerNostrPubkey=${peerNostrPubkey}, hasPeerSession=${hasPeerSession}, is_prekey=${msg.is_prekey}, to_address=${msg.to_address}`);
+  ctx.log?.info(`[${accountId}] DEBUG: peerNostrPubkey=${peerNostrPubkey}, hasPeerSession=${hasPeerSession}, is_prekey=${msg.is_prekey}, arrived_at=${msg.arrived_at}`);
   if ((!peerNostrPubkey || !hasPeerSession) && msg.is_prekey) {
     try {
       const prekeyInfo = await bridge.parsePrekeySender(msg.encrypted_content);
@@ -2342,7 +2342,7 @@ async function handleEncryptedDM(
       if (prekeyInfo.is_prekey && prekeyInfo.signal_identity_key) {
         const sigKey = prekeyInfo.signal_identity_key;
         // Identify the sender deterministically for accept-first:
-        // 1) signed_pre_key_id mapping (preferred), 2) to_address/onetimekey mapping.
+        // 1) signed_pre_key_id mapping (preferred), 2) arrived_at/onetimekey mapping.
         if (!peerNostrPubkey || !getPeerSessions(accountId).has(peerNostrPubkey)) {
           let senderNostrId: string | null = null;
           let senderName = sigKey.slice(0, 12);
@@ -2354,8 +2354,8 @@ async function handleEncryptedDM(
                 senderNostrId = lookup.nostr_pubkey;
                 ctx.log?.info(`[${accountId}] PreKey sender identified via signed_prekey_id=${prekeyInfo.signed_pre_key_id} → ${senderNostrId}`);
               }
-              if (lookup.local_signal_pubkey) {
-                localSignalPubkey = lookup.local_signal_pubkey;
+              if (lookup.my_signal_key) {
+                localSignalPubkey = lookup.my_signal_key;
               }
             } catch (e) {
               ctx.log?.error(`[${accountId}] lookupPeerBySignedPrekeyId failed: ${e}`);
@@ -2395,9 +2395,9 @@ async function handleEncryptedDM(
           };
           getPeerSessions(accountId).set(senderNostrId, newPeer);
 
-          // Update DB with remote signal_pubkey so Rust send_message can find it.
+          // Update DB with remote peer_signal_key so Rust send_message can find it.
           // savePeerMapping uses INSERT OR REPLACE — we must pass the signal key.
-          // local_signal_pubkey/privkey are cleared separately by clearPrekeyMaterial below.
+          // my_signal_key/privkey are cleared separately by clearPrekeyMaterial below.
           try { await bridge.savePeerMapping(senderNostrId, sigKey, 1, senderName); } catch (e) {
             ctx.log?.error(`[${accountId}] savePeerMapping after PreKey failed: ${e}`);
           }
@@ -2408,7 +2408,7 @@ async function handleEncryptedDM(
           friendRequestManager.setSessionEstablished(accountId, senderNostrId);
 
           // Step 4: next_send_addrs from decrypt are the peer's receiving addresses (our sending destination).
-          // Rust bridge now handles persisting these as my_sending_address. No TS action needed.
+          // Rust bridge now handles persisting these as peer_inbox. No TS action needed.
 
           // Clear sensitive PreKey material after address rotation is complete
           try { await bridge.clearPrekeyMaterial(senderNostrId); } catch { /* best effort */ }
@@ -2499,7 +2499,7 @@ async function handleEncryptedDM(
 
   if (!peerNostrPubkey) {
     ctx.log?.error(
-      `[${accountId}] Cannot identify peer for inbound kind:4 (to_address=${msg.to_address}, from=${msg.from_pubkey})`,
+      `[${accountId}] Cannot identify peer for inbound kind:4 (arrived_at=${msg.arrived_at}, from=${msg.from_pubkey})`,
     );
     return;
   }
@@ -2530,16 +2530,16 @@ async function handleEncryptedDM(
   // - Protocol Step 5/6: set NORMAL_CHAT only when flushing first queued post-handshake send.
 
   // Step 5+: next_send_addrs from decrypt are the peer's receiving addresses (our sending destination).
-  // Rust bridge now handles persisting these as my_sending_address. No TS action needed.
+  // Rust bridge now handles persisting these as peer_inbox. No TS action needed.
 
-  // Lazy cleanup: now that we received a message on msg.to_address, remove older
+  // Lazy cleanup: now that we received a message on msg.arrived_at, remove older
   // addresses for this peer (keep REMAIN_RECEIVE_KEYS_PER_PEER most recent).
   // This matches Keychat app's deleteReceiveKey behavior — only clean up when we
   // have proof the peer is using a newer address.
-  if (peerNostrPubkey && msg.to_address) {
+  if (peerNostrPubkey && msg.arrived_at) {
     try {
       const peerAddrs = getPeerSubscribedAddresses(accountId).get(peerNostrPubkey) ?? [];
-      const idx = peerAddrs.indexOf(msg.to_address);
+      const idx = peerAddrs.indexOf(msg.arrived_at);
       if (idx >= 0 && peerAddrs.length > REMAIN_RECEIVE_KEYS_PER_PEER) {
         // Keep addresses from (idx - REMAIN_RECEIVE_KEYS_PER_PEER + 1) onward
         const keepFrom = Math.max(0, idx - REMAIN_RECEIVE_KEYS_PER_PEER + 1);
@@ -2676,7 +2676,7 @@ async function handleEncryptedDM(
           const ghResult2 = await bridge.sendGroupMessage(joinResult.group_id, helloText, { subtype: 14 });
           if (ghResult2.member_rotations?.length) {
             for (const rot of ghResult2.member_rotations) {
-              await handleReceivingAddressRotation(bridge, accountId, { new_receiving_address: rot.new_receiving_address } as any, rot.member);
+              await handleReceivingAddressRotation(bridge, accountId, { my_new_inbox: rot.my_new_inbox } as any, rot.member);
             }
           }
         } catch (err) {
@@ -3005,7 +3005,7 @@ async function dispatchGroupToAgent(
       // Handle receiving address rotation for each group member
       if (groupResult.member_rotations?.length) {
         for (const rot of groupResult.member_rotations) {
-          await handleReceivingAddressRotation(bridge, accountId, { new_receiving_address: rot.new_receiving_address } as any, rot.member);
+          await handleReceivingAddressRotation(bridge, accountId, { my_new_inbox: rot.my_new_inbox } as any, rot.member);
         }
       }
     } catch (err) {
@@ -3068,9 +3068,9 @@ async function handleReceivingAddressRotation(
   sendResult: SendMessageResult,
   peerKey?: string,
 ): Promise<void> {
-  if (!sendResult.new_receiving_address) return;
+  if (!sendResult.my_new_inbox) return;
 
-  const { address } = await bridge.computeAddress(sendResult.new_receiving_address);
+  const { address } = await bridge.computeAddress(sendResult.my_new_inbox);
 
   if (!peerKey) {
     console.warn(`[keychat] handleReceivingAddressRotation: peerKey is falsy, skipping DB save for ${address.slice(0,16)}`);

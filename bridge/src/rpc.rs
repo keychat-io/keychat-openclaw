@@ -48,8 +48,8 @@ pub struct PeerSession {
     pub curve25519_pk_hex: String,
     /// Device ID used for Signal session addressing
     pub device_id: u32,
-    /// The peer's one-time receiving key (from hello)
-    pub onetimekey: Option<String>,
+    /// The peer's first inbox address (from hello)
+    pub peer_first_inbox: Option<String>,
     /// The peer's Nostr pubkey hex
     pub nostr_pubkey: String,
 }
@@ -157,7 +157,7 @@ impl BridgeState {
             "save_address_mapping" => self.handle_save_receiving_address(req.params).await,
             "get_address_mappings" => self.handle_get_receiving_addresses().await,
             "delete_address_mapping" => self.handle_delete_receiving_address(req.params).await,
-            "save_my_sending_address" => self.handle_save_my_sending_address(req.params).await,
+            "save_peer_inbox" => self.handle_save_peer_inbox(req.params).await,
 
             // --- Group (small group / sendAll) ---
             "create_group" => self.handle_create_group(req.params).await,
@@ -387,8 +387,8 @@ impl BridgeState {
             "keychat_message": keychat_msg,
             "qr_user_model": qr_model,
             "nostr_pubkey": account.nostr_pubkey_hex(),
-            "signal_pubkey": eph_pk_hex,
-            "local_signal_privkey": eph_sk_hex,
+            "my_signal_key": eph_pk_hex,
+            "my_signal_privkey": eph_sk_hex,
         });
 
         if let Some(to) = to_pubkey {
@@ -454,7 +454,7 @@ impl BridgeState {
         let peer = PeerSession {
             curve25519_pk_hex: qr_model.curve25519_pk_hex.clone(),
             device_id,
-            onetimekey: if qr_model.onetimekey.is_empty() {
+            peer_first_inbox: if qr_model.onetimekey.is_empty() {
                 None
             } else {
                 Some(qr_model.onetimekey.clone())
@@ -485,7 +485,7 @@ impl BridgeState {
             "session_established": true,
             "peer_nostr_pubkey": qr_model.pubkey,
             "peer_signal_pubkey": qr_model.curve25519_pk_hex,
-            "local_signal_pubkey": local_sig_pk,
+            "my_signal_key": local_sig_pk,
             "peer_name": qr_model.name,
             "peer_onetimekey": if qr_model.onetimekey.is_empty() { None } else { Some(&qr_model.onetimekey) },
             "device_id": device_id,
@@ -577,8 +577,8 @@ impl BridgeState {
             "sent": true,
             "event_id": event_id,
             "to_pubkey": to_pubkey,
-            "local_signal_pubkey": eph_pk_hex,
-            "onetimekey": onetimekey,
+            "my_signal_key": eph_pk_hex,
+            "peer_first_inbox": onetimekey,
         }))
     }
 
@@ -591,7 +591,7 @@ impl BridgeState {
     ///
     /// Flow (mirrors Keychat app's SignalChatService.sendMessage):
     ///   1. Determine destination address:
-    ///      - Check DB for cached my_sending_address (set during decrypt)
+    ///      - Check DB for cached peer_inbox (set during decrypt)
     ///      - If no cached address, use peer's onetimekey (first message after hello)
     ///      - Otherwise fall back to peer's nostr pubkey
     ///   2. If sending to onetimekey, wrap message in PrekeyMessageModel (contains our Signal ID + Schnorr sig)
@@ -682,23 +682,23 @@ impl BridgeState {
 
         // Look up peer session info
         let mut peer = self.peers.get(&to_str).cloned();
-        let mut local_signal_pubkey: Option<String> = None;
+        let mut my_signal_key: Option<String> = None;
 
         // Fallback: if peer not in memory, try to load from DB peer_mapping
         if let Some(signal) = self.signal.as_ref() {
             if let Ok(Some(m)) = signal.get_peer_mapping_by_nostr_pubkey(&to_str).await {
-                local_signal_pubkey = m.4.filter(|s| !s.is_empty());
+                my_signal_key = m.4.filter(|s| !s.is_empty());
                 if peer.is_none() {
                     if m.1.is_empty() {
                         // Placeholder mapping (hello sent, no reply yet)
                         log::info!("Peer {} has placeholder mapping (no signal pubkey yet), waiting for hello reply", to_str);
                     } else {
-                        log::info!("Loaded peer {} from DB peer_mapping (signal: {}, local_signal: {:?})", to_str, &m.1[..16.min(m.1.len())], &local_signal_pubkey);
+                        log::info!("Loaded peer {} from DB peer_mapping (signal: {}, local_signal: {:?})", to_str, &m.1[..16.min(m.1.len())], &my_signal_key);
                         let restored_peer = PeerSession {
                             nostr_pubkey: m.0.clone(),
                             curve25519_pk_hex: m.1.clone(),
                             device_id: m.2 as u32,
-                            onetimekey: m.6.clone().filter(|s| !s.is_empty()),
+                            peer_first_inbox: m.6.clone().filter(|s| !s.is_empty()),
                         };
                         self.peers.insert(to_str.clone(), restored_peer.clone());
                         peer = Some(restored_peer);
@@ -728,22 +728,22 @@ impl BridgeState {
 
         // Determine destination address (mirrors Keychat's _getSignalToAddress)
         // Determine destination address:
-        // 1. Cached my_sending_address (set during decrypt — most reliable)
+        // 1. Cached peer_inbox (set during decrypt — most reliable)
         // 2. Peer's onetimekey (first message after hello)
         // 3. Peer's nostr pubkey (ultimate fallback)
         let mut dest_pubkey = nostr_pubkey.clone();
         let mut sending_to_onetimekey = false;
 
-        let cached_sending_addr = signal.get_my_sending_address(&nostr_pubkey).await.ok().flatten();
+        let cached_sending_addr = signal.get_peer_inbox(&nostr_pubkey).await.ok().flatten();
         if let Some(ref addr) = cached_sending_addr {
-            log::info!("Using cached my_sending_address: {}", &addr[..16.min(addr.len())]);
+            log::info!("Using cached peer_inbox: {}", &addr[..16.min(addr.len())]);
             dest_pubkey = addr.clone();
         } else if let Some(ref p) = peer {
-            if let Some(ref otk) = p.onetimekey {
+            if let Some(ref otk) = p.peer_first_inbox {
                 if !otk.is_empty() {
                     dest_pubkey = otk.clone();
                     sending_to_onetimekey = true;
-                    log::info!("Sending to peer's onetimekey: {}", otk);
+                    log::info!("Sending to peer's peer_first_inbox: {}", otk);
                 }
             }
         }
@@ -754,7 +754,7 @@ impl BridgeState {
                 .duration_since(std::time::UNIX_EPOCH)?
                 .as_millis() as i64;
             // Use ephemeral signal key if available, otherwise account's default
-            let signal_id_for_sign = local_signal_pubkey.as_deref()
+            let signal_id_for_sign = my_signal_key.as_deref()
                 .unwrap_or(&account.signal_pubkey_hex()).to_string();
             let sign_content = KeychatAccount::get_sign_message(
                 &account.nostr_pubkey_hex(),
@@ -805,7 +805,7 @@ impl BridgeState {
         let encrypt_result = signal
             .encrypt_with_store(
                 &account,
-                local_signal_pubkey.as_deref(),
+                my_signal_key.as_deref(),
                 &signal_pubkey,
                 &plaintext_to_encrypt,
                 device_id,
@@ -819,7 +819,7 @@ impl BridgeState {
         );
 
         // Update receiving address if ratchet advanced
-        if let Some(ref new_addr) = encrypt_result.new_receiving_address {
+        if let Some(ref new_addr) = encrypt_result.my_new_inbox {
             log::info!("New receiving address from ratchet: {}", new_addr);
         }
 
@@ -835,7 +835,7 @@ impl BridgeState {
 
         // Tag both the destination pubkey and signal receiving address if available
         let mut receiver_pubkeys = vec![dest_pubkey.as_str()];
-        if let Some(ref new_addr) = encrypt_result.new_receiving_address {
+        if let Some(ref new_addr) = encrypt_result.my_new_inbox {
             // The new_receiving_address contains ratchet info, but we need to
             // also tag it so Keychat knows about the address rotation
             // Format is "seed-signedPublic", we might need to hash it
@@ -849,17 +849,17 @@ impl BridgeState {
         // If we sent to onetimekey, clear it from memory and DB (one-time use)
         if sending_to_onetimekey {
             if let Some(p) = self.peers.get_mut(&to_str) {
-                p.onetimekey = None;
+                p.peer_first_inbox = None;
             }
             // Clear from DB too so it's not restored on restart
             if let Some(sig) = self.signal.as_ref() {
-                let _ = sig.clear_onetimekey(&to_str).await;
+                let _ = sig.clear_peer_first_inbox(&to_str).await;
             }
         }
 
         // Auto-subscribe to ratchet-derived receiving address
         let mut derived_receiving_address: Option<String> = None;
-        if let Some(ref new_addr) = encrypt_result.new_receiving_address {
+        if let Some(ref new_addr) = encrypt_result.my_new_inbox {
             match signal::generate_seed_from_ratchetkey_pair(new_addr) {
                 Ok(derived_pubkey) => {
                     log::info!("Derived receiving address from ratchet: {}", derived_pubkey);
@@ -890,7 +890,7 @@ impl BridgeState {
             "is_prekey": encrypt_result.is_prekey,
             "dest_pubkey": dest_pubkey,
             "sending_to_onetimekey": sending_to_onetimekey,
-            "new_receiving_address": encrypt_result.new_receiving_address,
+            "my_new_inbox": encrypt_result.my_new_inbox,
             "derived_receiving_address": derived_receiving_address,
             "ephemeral_sender": sender_keys.public_key().to_string(),
         }))
@@ -957,14 +957,14 @@ impl BridgeState {
 
         let peer = signal.lookup_peer_by_signed_prekey_id(spk_id).await?;
         log::info!("lookup_peer_by_signed_prekey_id({}): {:?}", spk_id, peer);
-        // Also return local_signal_pubkey so caller can pass it directly to decrypt
+        // Also return my_signal_key so caller can pass it directly to decrypt
         let local_sig_pk = if let Some(ref npub) = peer {
             signal.get_peer_mapping_by_nostr_pubkey(npub).await
                 .ok().flatten().and_then(|m| m.4).filter(|s| !s.is_empty())
         } else { None };
         Ok(serde_json::json!({
             "nostr_pubkey": peer,
-            "local_signal_pubkey": local_sig_pk,
+            "my_signal_key": local_sig_pk,
         }))
     }
 
@@ -1023,15 +1023,15 @@ impl BridgeState {
             &ciphertext_b64,
         )?;
 
-        // Use caller-provided local_signal_pubkey if available (preferred — avoids DB scan).
+        // Use caller-provided my_signal_key if available (preferred — avoids DB scan).
         // Otherwise fall back to looking up by peer's nostr_pubkey or signal_pubkey.
         let caller_local_key = params
-            .get("local_signal_pubkey")
+            .get("my_signal_key")
             .and_then(|v| v.as_str())
             .filter(|s| !s.is_empty())
             .map(|s| s.to_string());
 
-        let local_signal_pubkey: Option<String> = if caller_local_key.is_some() {
+        let my_signal_key: Option<String> = if caller_local_key.is_some() {
             caller_local_key
         } else if let Some(nostr_pk) = params.get("nostr_pubkey").and_then(|v| v.as_str()).filter(|s| !s.is_empty()) {
             // Look up by nostr pubkey (single row query)
@@ -1048,9 +1048,9 @@ impl BridgeState {
 
         log::info!("decrypt_message: from={}, is_prekey={}, device_id={}, ciphertext_len={}, local_store={:?}",
             from_pubkey, is_prekey, device_id, ciphertext_bytes.len(),
-            local_signal_pubkey.as_ref().map(|s| &s[..16.min(s.len())]));
+            my_signal_key.as_ref().map(|s| &s[..16.min(s.len())]));
 
-        let result = if let Some(ref local_store_key) = local_signal_pubkey {
+        let result = if let Some(ref local_store_key) = my_signal_key {
             match signal
                 .decrypt_with_store(account, Some(local_store_key), &from_pubkey, &ciphertext_bytes, device_id, room_id, is_prekey)
                 .await
@@ -1063,7 +1063,7 @@ impl BridgeState {
             }
         } else if is_prekey {
             // No local store identified for this PreKey message — reject to avoid session corruption.
-            log::error!("PreKey decrypt: no local_signal_pubkey found for from={}, rejecting", &from_pubkey[..16.min(from_pubkey.len())]);
+            log::error!("PreKey decrypt: no my_signal_key found for from={}, rejecting", &from_pubkey[..16.min(from_pubkey.len())]);
             return Err(anyhow::anyhow!("No ephemeral Signal store found for PreKey message from {}", &from_pubkey[..16.min(from_pubkey.len())]));
         } else {
             signal.decrypt(account, &from_pubkey, &ciphertext_bytes, device_id, room_id, is_prekey).await?
@@ -1093,7 +1093,7 @@ impl BridgeState {
             }
         }
 
-        // Always update my_sending_address from session bobAddress after decrypt.
+        // Always update peer_inbox from session bobAddress after decrypt.
         // bobAddress is persisted by signal-storage's store_session on every decrypt,
         // so it always reflects the latest ratchet state.
         {
@@ -1108,7 +1108,7 @@ impl BridgeState {
                 });
             if let Some(ref nostr_pk) = peer_nostr {
                 // Try per-peer store first, then account default
-                let bob_addr = if let Some(ref lsk) = local_signal_pubkey {
+                let bob_addr = if let Some(ref lsk) = my_signal_key {
                     signal.get_peer_receiving_address_by_local_key(lsk, &from_pubkey, device_id).await.ok().flatten()
                 } else {
                     signal.get_peer_receiving_address(account, &from_pubkey, device_id).await.ok().flatten()
@@ -1117,10 +1117,10 @@ impl BridgeState {
                     if !ba.starts_with("05") {
                         match signal::generate_seed_from_ratchetkey_pair(ba) {
                             Ok(derived) => {
-                                if let Err(e) = signal.save_my_sending_address(nostr_pk, &derived).await {
-                                    log::warn!("bobAddress sync: failed to save my_sending_address: {}", e);
+                                if let Err(e) = signal.save_peer_inbox(nostr_pk, &derived).await {
+                                    log::warn!("bobAddress sync: failed to save peer_inbox: {}", e);
                                 } else {
-                                    log::info!("bobAddress sync: updated my_sending_address {} for peer {}", &derived[..16], &nostr_pk[..16]);
+                                    log::info!("bobAddress sync: updated peer_inbox {} for peer {}", &derived[..16], &nostr_pk[..16]);
                                 }
                             }
                             Err(e) => log::warn!("bobAddress sync: failed to derive from bobAddress: {}", e),
@@ -1290,7 +1290,7 @@ impl BridgeState {
             .ok_or_else(|| anyhow::anyhow!("No account initialized"))?;
         let sessions = signal.get_all_sessions_info(account).await?;
         let result: Vec<serde_json::Value> = sessions.into_iter().map(|(addr, device)| {
-            serde_json::json!({"signal_pubkey": addr, "device_id": device})
+            serde_json::json!({"peer_signal_key": addr, "device_id": device})
         }).collect();
         Ok(serde_json::json!({"sessions": result}))
     }
@@ -1301,9 +1301,9 @@ impl BridgeState {
             .ok_or_else(|| anyhow::anyhow!("Signal not initialized"))?;
         let mappings = signal.get_all_peer_mappings_full().await?;
         let result: Vec<serde_json::Value> = mappings.into_iter().map(|(nostr_pk, signal_pk, device_id, name, local_pk, _local_sk, _otk)| {
-            let mut v = serde_json::json!({"nostr_pubkey": nostr_pk, "signal_pubkey": signal_pk, "device_id": device_id, "name": name});
+            let mut v = serde_json::json!({"nostr_pubkey": nostr_pk, "peer_signal_key": signal_pk, "device_id": device_id, "name": name});
             if let Some(lpk) = local_pk {
-                v["local_signal_pubkey"] = serde_json::json!(lpk);
+                v["my_signal_key"] = serde_json::json!(lpk);
             }
             v
         }).collect();
@@ -1316,7 +1316,7 @@ impl BridgeState {
             .ok_or_else(|| anyhow::anyhow!("Signal not initialized"))?;
         let nostr_pubkey = params.get("nostr_pubkey").and_then(|v| v.as_str())
             .ok_or_else(|| anyhow::anyhow!("nostr_pubkey required"))?;
-        let signal_pubkey = params.get("signal_pubkey").and_then(|v| v.as_str())
+        let signal_pubkey = params.get("peer_signal_key").or_else(|| params.get("signal_pubkey")).and_then(|v| v.as_str())
             .ok_or_else(|| anyhow::anyhow!("signal_pubkey required"))?;
         let device_id = params.get("device_id").and_then(|v| v.as_u64()).unwrap_or(1) as u32;
         let name = params.get("name").and_then(|v| v.as_str()).unwrap_or("");
@@ -1328,7 +1328,7 @@ impl BridgeState {
                 nostr_pubkey: nostr_pubkey.to_string(),
                 curve25519_pk_hex: signal_pubkey.to_string(),
                 device_id,
-                onetimekey: None,
+                peer_first_inbox: None,
             };
             self.peers.insert(nostr_pubkey.to_string(), peer);
             log::info!("Updated in-memory peer cache for {} (signal: {})", nostr_pubkey, signal_pubkey);
@@ -1370,15 +1370,15 @@ impl BridgeState {
         Ok(serde_json::json!({"deleted": true}))
     }
 
-    /// Save my_sending_address for a peer.
-    async fn handle_save_my_sending_address(&self, params: serde_json::Value) -> Result<serde_json::Value> {
+    /// Save peer_inbox for a peer.
+    async fn handle_save_peer_inbox(&self, params: serde_json::Value) -> Result<serde_json::Value> {
         let signal = self.signal.as_ref()
             .ok_or_else(|| anyhow::anyhow!("Signal not initialized"))?;
         let nostr_pubkey = params.get("nostr_pubkey").and_then(|v| v.as_str())
             .ok_or_else(|| anyhow::anyhow!("nostr_pubkey required"))?;
         let address = params.get("address").and_then(|v| v.as_str())
             .ok_or_else(|| anyhow::anyhow!("address required"))?;
-        signal.save_my_sending_address(nostr_pubkey, address).await?;
+        signal.save_peer_inbox(nostr_pubkey, address).await?;
         Ok(serde_json::json!({"saved": true}))
     }
 
@@ -1414,7 +1414,7 @@ impl BridgeState {
             .ok_or_else(|| anyhow::anyhow!("Signal not initialized"))?;
         let account = self.account.as_ref()
             .ok_or_else(|| anyhow::anyhow!("No account initialized"))?;
-        let signal_pubkey = params.get("signal_pubkey").and_then(|v| v.as_str())
+        let signal_pubkey = params.get("peer_signal_key").or_else(|| params.get("signal_pubkey")).and_then(|v| v.as_str())
             .ok_or_else(|| anyhow::anyhow!("signal_pubkey required"))?;
         let device_id = params.get("device_id").and_then(|v| v.as_u64())
             .map(|v| v as u32);
@@ -1655,7 +1655,7 @@ impl BridgeState {
                                 nostr_pubkey: m.0.clone(),
                                 curve25519_pk_hex: m.1.clone(),
                                 device_id: m.2 as u32,
-                                onetimekey: m.6.clone().filter(|s| !s.is_empty()),
+                                peer_first_inbox: m.6.clone().filter(|s| !s.is_empty()),
                             })
                     } else { None }
                 } else { None };
@@ -1680,10 +1680,10 @@ impl BridgeState {
                     if let Some(eid) = result.get("event_id").and_then(|v| v.as_str()) {
                         event_ids.push(eid.to_string());
                     }
-                    if let Some(nra) = result.get("new_receiving_address").and_then(|v| v.as_str()) {
+                    if let Some(nra) = result.get("my_new_inbox").and_then(|v| v.as_str()) {
                         member_rotations.push(serde_json::json!({
                             "member": member_pubkey,
-                            "new_receiving_address": nra,
+                            "my_new_inbox": nra,
                         }));
                     }
                     sent_count += 1;

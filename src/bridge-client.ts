@@ -60,7 +60,7 @@ export interface InboundMessage {
   is_prekey: boolean;
   encrypted_content: string;
   event_kind: number;
-  to_address: string | null;
+  arrived_at: string | null;
   nip04_decrypted: boolean;
   /** For Gift Wrap events: the inner rumor's kind (14=DM, 444=MLS Welcome) */
   inner_kind?: number;
@@ -70,7 +70,7 @@ export interface InboundMessage {
 export interface SendMessageResult {
   sent: boolean;
   event_id: string;
-  new_receiving_address?: string;
+  my_new_inbox?: string;
   derived_receiving_address?: string;
   is_prekey?: boolean;
   sending_to_onetimekey?: boolean;
@@ -79,7 +79,7 @@ export interface SendMessageResult {
 export interface ProcessHelloResult {
   session_established: boolean;
   peer_nostr_pubkey: string;
-  peer_signal_pubkey: string;
+  peer_signal_key: string;
   peer_name: string;
   device_id: number;
   msg_type: number;
@@ -141,7 +141,7 @@ export class KeychatBridgeClient {
 
         // Check if this is an unsolicited push event (id=0, has "event" field)
         if (parsed.id === 0 && parsed.event === "inbound_message" && parsed.data) {
-          console.log(`[keychat-bridge] Inbound push received: event_kind=${(parsed.data as any).event_kind} from=${(parsed.data as any).from_pubkey?.slice(0,16)} to=${(parsed.data as any).to_address?.slice(0,16)} prekey=${(parsed.data as any).is_prekey}`);
+          console.log(`[keychat-bridge] Inbound push received: event_kind=${(parsed.data as any).event_kind} from=${(parsed.data as any).from_pubkey?.slice(0,16)} to=${(parsed.data as any).arrived_at?.slice(0,16)} prekey=${(parsed.data as any).is_prekey}`);
           if (this.onInboundMessage) {
             this.onInboundMessage(parsed.data as InboundMessage);
           } else {
@@ -433,14 +433,14 @@ export class KeychatBridgeClient {
     isPrekey?: boolean,
     localSignalPubkey?: string,
     nostrPubkey?: string,
-  ): Promise<{ plaintext: string; next_send_addrs?: string[] }> {
+  ): Promise<{ plaintext: string}> {
     return (await this.call("decrypt_message", {
       from,
       ciphertext,
       is_prekey: isPrekey ?? false,
-      ...(localSignalPubkey ? { local_signal_pubkey: localSignalPubkey } : {}),
+      ...(localSignalPubkey ? { my_signal_key: localSignalPubkey } : {}),
       ...(nostrPubkey ? { nostr_pubkey: nostrPubkey } : {}),
-    })) as { plaintext: string; next_send_addrs?: string[] };
+    })) as { plaintext: string};
   }
 
   /** Connect to Nostr relays. */
@@ -464,18 +464,18 @@ export class KeychatBridgeClient {
   /** Get all receiving addresses from Signal sessions in DB (for resubscription on restart). */
 
   /** Get all peer sessions from DB. */
-  async getAllSessions(): Promise<{ sessions: Array<{ signal_pubkey: string; device_id: string }> }> {
+  async getAllSessions(): Promise<{ sessions: Array<{ peer_signal_key: string; device_id: string }> }> {
     return (await this.call("get_all_sessions", {})) as any;
   }
 
   /** Get all peer mappings (nostr↔signal pubkey). */
-  async getPeerMappings(): Promise<{ mappings: Array<{ nostr_pubkey: string; signal_pubkey: string; device_id: number; name: string }> }> {
+  async getPeerMappings(): Promise<{ mappings: Array<{ nostr_pubkey: string; peer_signal_key: string; device_id: number; name: string }> }> {
     return (await this.call("get_peer_mappings", {})) as any;
   }
 
   /** Save a peer mapping. */
   async savePeerMapping(nostrPubkey: string, signalPubkey: string, deviceId: number, name: string): Promise<{ saved: boolean }> {
-    return (await this.call("save_peer_mapping", { nostr_pubkey: nostrPubkey, signal_pubkey: signalPubkey, device_id: deviceId, name })) as any;
+    return (await this.call("save_peer_mapping", { nostr_pubkey: nostrPubkey, peer_signal_key: signalPubkey, device_id: deviceId, name })) as any;
   }
 
   /** Delete a peer mapping by nostr pubkey. */
@@ -503,7 +503,7 @@ export class KeychatBridgeClient {
     return (await this.call("parse_prekey_sender", { ciphertext })) as any;
   }
 
-  async lookupPeerBySignedPrekeyId(signedPrekeyId: number): Promise<{ nostr_pubkey: string | null; local_signal_pubkey?: string | null }> {
+  async lookupPeerBySignedPrekeyId(signedPrekeyId: number): Promise<{ nostr_pubkey: string | null; my_signal_key?: string | null }> {
     return (await this.call("lookup_peer_by_signed_prekey_id", { signed_prekey_id: signedPrekeyId })) as any;
   }
 
@@ -543,9 +543,9 @@ export class KeychatBridgeClient {
     return (await this.call("delete_address_mapping", { address })) as any;
   }
 
-  /** Save my_sending_address for a peer. */
+  /** Save peer_inbox for a peer. */
   async saveMySendingAddress(nostrPubkey: string, address: string): Promise<{ saved: boolean }> {
-    return (await this.call("save_my_sending_address", { nostr_pubkey: nostrPubkey, address })) as any;
+    return (await this.call("save_peer_inbox", { nostr_pubkey: nostrPubkey, address })) as any;
   }
 
   /** Persist a message queued while waiting for Protocol Step 3 accept-first. */
@@ -653,7 +653,7 @@ export class KeychatBridgeClient {
 
   /** Delete a Signal session for a peer. */
   async deleteSession(signalPubkey: string, deviceId?: number): Promise<{ deleted: boolean }> {
-    return (await this.call("delete_session", { signal_pubkey: signalPubkey, device_id: deviceId })) as any;
+    return (await this.call("delete_session", { peer_signal_key: signalPubkey, device_id: deviceId })) as any;
   }
 
   /** Clean up orphaned session rows with no matching peer_mapping entry. */
@@ -738,7 +738,7 @@ export class KeychatBridgeClient {
     total_members: number;
     event_ids: string[];
     errors: string[];
-    member_rotations?: Array<{ member: string; new_receiving_address: string }>;
+    member_rotations?: Array<{ member: string; my_new_inbox: string }>;
   }> {
     return (await this.call("send_group_message", {
       group_id: groupId,

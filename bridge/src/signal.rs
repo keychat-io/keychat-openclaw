@@ -30,12 +30,10 @@ pub struct PrekeyBundleInfo {
 pub struct EncryptResult {
     /// The ciphertext bytes (Signal protocol message serialized)
     pub ciphertext: Vec<u8>,
-    /// New receiving address (derived from ratchet key pair), if rotated
-    pub new_receiving_address: Option<String>,
+    /// New inbox address (derived from ratchet key pair), if rotated
+    pub my_new_inbox: Option<String>,
     /// Message key hash (for deduplication)
     pub msg_key_hash: String,
-    /// Previous alice addresses (for cleanup)
-    pub next_send_addrs: Option<Vec<String>>,
     /// Whether this is a pre-key message
     pub is_prekey: bool,
 }
@@ -44,7 +42,6 @@ pub struct EncryptResult {
 pub struct DecryptResult {
     pub plaintext: Vec<u8>,
     pub msg_key_hash: String,
-    pub next_send_addrs: Option<Vec<String>>,
 }
 
 pub struct SignalManager {
@@ -167,7 +164,7 @@ impl SignalManager {
 
     /// Generate a complete QRUserModel for a hello message using an EPHEMERAL Signal keypair.
     /// Each outgoing hello uses a fresh random Signal identity — this matches Keychat app behavior.
-    /// Returns (QRUserModel, ephemeral_signal_pubkey_hex, ephemeral_signal_privkey_hex, onetimekey_hex).
+    /// Returns (QRUserModel, ephemeral_signal_pubkey_hex, ephemeral_signal_privkey_hex, peer_first_inbox_hex).
     pub async fn generate_hello_bundle_ephemeral(
         &mut self,
         account: &KeychatAccount,
@@ -189,15 +186,15 @@ impl SignalManager {
         let global_sign = account.schnorr_sign(&sign_content)?;
 
         // Generate a one-time receiving key so the peer can route their reply
-        // (same approach as Keychat app: random Nostr keypair, pubkey as onetimekey)
+        // (same approach as Keychat app: random Nostr keypair, pubkey as peer_first_inbox)
         let otk_keys = nostr::Keys::generate();
-        let onetimekey = otk_keys.public_key().to_hex();
+        let peer_first_inbox = otk_keys.public_key().to_hex();
 
         let model = QRUserModel {
             name: name.to_string(),
             pubkey: nostr_id,
             curve25519_pk_hex: eph_pk_hex.clone(),
-            onetimekey: onetimekey.clone(),
+            onetimekey: peer_first_inbox.clone(),
             signed_id: bundle.signed_prekey_id,
             signed_public: bundle.signed_prekey_public_hex,
             signed_signature: bundle.signed_prekey_signature_hex,
@@ -210,7 +207,7 @@ impl SignalManager {
             lightning: None,
         };
 
-        Ok((model, eph_pk_hex, eph_sk_hex, onetimekey))
+        Ok((model, eph_pk_hex, eph_sk_hex, peer_first_inbox))
     }
 
     /// Restore an ephemeral Signal store from saved keypair (used on startup).
@@ -350,16 +347,16 @@ impl SignalManager {
     /// Encrypt a plaintext message using Signal Protocol.
     /// Returns EncryptResult with ciphertext, new receiving address, and msg key hash.
     /// Encrypt using a specific local Signal store (looked up by our local signal pubkey hex).
-    /// Falls back to account's default store if local_signal_pubkey is None.
+    /// Falls back to account's default store if my_signal_key is None.
     pub async fn encrypt_with_store(
         &mut self,
         account: &KeychatAccount,
-        local_signal_pubkey_hex: Option<&str>,
+        my_signal_key_hex: Option<&str>,
         to_curve25519_pubkey: &str,
         plaintext: &str,
         device_id: u32,
     ) -> Result<EncryptResult> {
-        let store = if let Some(lsk) = local_signal_pubkey_hex.filter(|s| !s.is_empty()) {
+        let store = if let Some(lsk) = my_signal_key_hex.filter(|s| !s.is_empty()) {
             let bytes = hex::decode(lsk)?;
             let key: [u8; 33] = bytes.try_into().map_err(|_| anyhow::anyhow!("Invalid local signal pubkey len"))?;
             self.stores.get_mut(&key)
@@ -370,7 +367,7 @@ impl SignalManager {
         let remote_address =
             ProtocolAddress::new(to_curve25519_pubkey.to_string(), device_id.into());
 
-        let (ciphertext_msg, new_receiving, msg_key_hash, my_next_addrs) = message_encrypt(
+        let (ciphertext_msg, new_receiving, msg_key_hash, _) = message_encrypt(
             plaintext.as_bytes(),
             &remote_address,
             &mut store.session_store,
@@ -387,9 +384,8 @@ impl SignalManager {
 
         Ok(EncryptResult {
             ciphertext: ciphertext_msg.serialize().to_vec(),
-            new_receiving_address: new_receiving,
+            my_new_inbox: new_receiving,
             msg_key_hash,
-            next_send_addrs: my_next_addrs,
             is_prekey,
         })
     }
@@ -405,7 +401,7 @@ impl SignalManager {
         let remote_address =
             ProtocolAddress::new(to_curve25519_pubkey.to_string(), device_id.into());
 
-        let (ciphertext_msg, new_receiving, msg_key_hash, my_next_addrs) = message_encrypt(
+        let (ciphertext_msg, new_receiving, msg_key_hash, _) = message_encrypt(
             plaintext.as_bytes(),
             &remote_address,
             &mut store.session_store,
@@ -422,9 +418,8 @@ impl SignalManager {
 
         Ok(EncryptResult {
             ciphertext: ciphertext_msg.serialize().to_vec(),
-            new_receiving_address: new_receiving,
+            my_new_inbox: new_receiving,
             msg_key_hash,
-            next_send_addrs: my_next_addrs,
             is_prekey,
         })
     }
@@ -433,14 +428,14 @@ impl SignalManager {
     pub async fn decrypt_with_store(
         &mut self,
         account: &KeychatAccount,
-        local_signal_pubkey_hex: Option<&str>,
+        my_signal_key_hex: Option<&str>,
         from_curve25519_pubkey: &str,
         ciphertext_bytes: &[u8],
         device_id: u32,
         room_id: u32,
         is_prekey: bool,
     ) -> Result<DecryptResult> {
-        let store = if let Some(lsk) = local_signal_pubkey_hex.filter(|s| !s.is_empty()) {
+        let store = if let Some(lsk) = my_signal_key_hex.filter(|s| !s.is_empty()) {
             let bytes = hex::decode(lsk)?;
             let key: [u8; 33] = bytes.try_into().map_err(|_| anyhow::anyhow!("Invalid local signal pubkey len"))?;
             self.stores.get_mut(&key)
@@ -458,7 +453,7 @@ impl SignalManager {
         };
 
         let mut csprng = OsRng;
-        let (plaintext, msg_key_hash, my_next_addrs) = message_decrypt(
+        let (plaintext, msg_key_hash, _) = message_decrypt(
             &ciphertext_msg,
             &remote_address,
             &mut store.session_store,
@@ -475,7 +470,6 @@ impl SignalManager {
         Ok(DecryptResult {
             plaintext,
             msg_key_hash,
-            next_send_addrs: my_next_addrs,
         })
     }
 
@@ -500,7 +494,7 @@ impl SignalManager {
         };
 
         let mut csprng = OsRng;
-        let (plaintext, msg_key_hash, my_next_addrs) = message_decrypt(
+        let (plaintext, msg_key_hash, _) = message_decrypt(
             &ciphertext_msg,
             &remote_address,
             &mut store.session_store,
@@ -517,7 +511,6 @@ impl SignalManager {
         Ok(DecryptResult {
             plaintext,
             msg_key_hash,
-            next_send_addrs: my_next_addrs,
         })
     }
 
@@ -535,11 +528,11 @@ impl SignalManager {
     /// Get session using a specific local Signal store key.
     pub async fn get_session_by_local_key(
         &self,
-        local_signal_pubkey_hex: &str,
+        my_signal_key_hex: &str,
         peer_signal_pubkey: &str,
         device_id: u32,
     ) -> Result<Option<signal_store::SignalSession>> {
-        let bytes = hex::decode(local_signal_pubkey_hex)?;
+        let bytes = hex::decode(my_signal_key_hex)?;
         let key: [u8; 33] = bytes.try_into().map_err(|_| anyhow::anyhow!("Invalid local signal pubkey len"))?;
         self.get_session_by_store_key(&key, peer_signal_pubkey, device_id).await
     }
@@ -578,11 +571,11 @@ impl SignalManager {
     /// Get peer_recv_addr using a specific local Signal store.
     pub async fn get_peer_receiving_address_by_local_key(
         &self,
-        local_signal_pubkey_hex: &str,
+        my_signal_key_hex: &str,
         peer_signal_pubkey: &str,
         device_id: u32,
     ) -> Result<Option<String>> {
-        let session = self.get_session_by_local_key(local_signal_pubkey_hex, peer_signal_pubkey, device_id).await?;
+        let session = self.get_session_by_local_key(my_signal_key_hex, peer_signal_pubkey, device_id).await?;
         Ok(session.and_then(|s| s.bob_address))
     }
     /// Get all peer sessions from the DB.
@@ -632,11 +625,18 @@ impl SignalManager {
             log::info!("Renamed peer_mysendingaddress_mapping → peer_mapping");
         }
 
+        // Rename columns from old names (ignore errors if already renamed)
+        let _ = signal_store::sqlx::query("ALTER TABLE peer_mapping RENAME COLUMN my_sending_address TO peer_inbox").execute(self.pool.database()).await;
+        let _ = signal_store::sqlx::query("ALTER TABLE peer_mapping RENAME COLUMN local_signal_pubkey TO my_signal_key").execute(self.pool.database()).await;
+        let _ = signal_store::sqlx::query("ALTER TABLE peer_mapping RENAME COLUMN local_signal_privkey TO my_signal_privkey").execute(self.pool.database()).await;
+        let _ = signal_store::sqlx::query("ALTER TABLE peer_mapping RENAME COLUMN signal_pubkey TO peer_signal_key").execute(self.pool.database()).await;
+        let _ = signal_store::sqlx::query("ALTER TABLE peer_mapping RENAME COLUMN onetimekey TO peer_first_inbox").execute(self.pool.database()).await;
+
         // Create table if not exists
         signal_store::sqlx::query(
             "CREATE TABLE IF NOT EXISTS peer_mapping (
                 nostr_pubkey TEXT PRIMARY KEY,
-                signal_pubkey TEXT NOT NULL,
+                peer_signal_key TEXT NOT NULL,
                 device_id INTEGER NOT NULL,
                 name TEXT NOT NULL DEFAULT '',
                 created_at INTEGER NOT NULL
@@ -646,19 +646,19 @@ impl SignalManager {
         .await?;
         // Add columns if missing (migration for existing DBs)
         let _ = signal_store::sqlx::query(
-            "ALTER TABLE peer_mapping ADD COLUMN local_signal_pubkey TEXT"
+            "ALTER TABLE peer_mapping ADD COLUMN my_signal_key TEXT"
         ).execute(self.pool.database()).await;
         let _ = signal_store::sqlx::query(
-            "ALTER TABLE peer_mapping ADD COLUMN local_signal_privkey TEXT"
+            "ALTER TABLE peer_mapping ADD COLUMN my_signal_privkey TEXT"
         ).execute(self.pool.database()).await;
         let _ = signal_store::sqlx::query(
             "ALTER TABLE peer_mapping ADD COLUMN signed_prekey_id INTEGER"
         ).execute(self.pool.database()).await;
         let _ = signal_store::sqlx::query(
-            "ALTER TABLE peer_mapping ADD COLUMN onetimekey TEXT"
+            "ALTER TABLE peer_mapping ADD COLUMN peer_first_inbox TEXT"
         ).execute(self.pool.database()).await;
         let _ = signal_store::sqlx::query(
-            "ALTER TABLE peer_mapping ADD COLUMN my_sending_address TEXT"
+            "ALTER TABLE peer_mapping ADD COLUMN peer_inbox TEXT"
         ).execute(self.pool.database()).await;
         Ok(())
     }
@@ -673,7 +673,7 @@ impl SignalManager {
         // Preserve any previously saved local (ephemeral) Signal keypair for this peer.
         // This avoids wiping the local store mapping when TS updates only remote metadata.
         let existing = signal_store::sqlx::query(
-            "SELECT local_signal_pubkey, local_signal_privkey FROM peer_mapping WHERE nostr_pubkey = ?"
+            "SELECT my_signal_key, my_signal_privkey FROM peer_mapping WHERE nostr_pubkey = ?"
         )
         .bind(nostr_pubkey)
         .fetch_optional(self.pool.database())
@@ -707,12 +707,12 @@ impl SignalManager {
         signal_pubkey: &str,
         device_id: u32,
         name: &str,
-        local_signal_pubkey: Option<&str>,
-        local_signal_privkey: Option<&str>,
+        my_signal_key: Option<&str>,
+        my_signal_privkey: Option<&str>,
     ) -> Result<()> {
         self.save_peer_mapping_full_with_spk(
             nostr_pubkey, signal_pubkey, device_id, name,
-            local_signal_pubkey, local_signal_privkey, None,
+            my_signal_key, my_signal_privkey, None,
         ).await
     }
 
@@ -722,13 +722,13 @@ impl SignalManager {
         signal_pubkey: &str,
         device_id: u32,
         name: &str,
-        local_signal_pubkey: Option<&str>,
-        local_signal_privkey: Option<&str>,
+        my_signal_key: Option<&str>,
+        my_signal_privkey: Option<&str>,
         signed_prekey_id: Option<u32>,
     ) -> Result<()> {
         self.save_peer_mapping_full_with_spk_otk(
             nostr_pubkey, signal_pubkey, device_id, name,
-            local_signal_pubkey, local_signal_privkey, signed_prekey_id, None,
+            my_signal_key, my_signal_privkey, signed_prekey_id, None,
         ).await
     }
 
@@ -738,26 +738,26 @@ impl SignalManager {
         signal_pubkey: &str,
         device_id: u32,
         name: &str,
-        local_signal_pubkey: Option<&str>,
-        local_signal_privkey: Option<&str>,
+        my_signal_key: Option<&str>,
+        my_signal_privkey: Option<&str>,
         signed_prekey_id: Option<u32>,
-        onetimekey: Option<&str>,
+        peer_first_inbox: Option<&str>,
     ) -> Result<()> {
         let now = SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)?
             .as_secs() as i64;
         signal_store::sqlx::query(
-            "INSERT OR REPLACE INTO peer_mapping (nostr_pubkey, signal_pubkey, device_id, name, created_at, local_signal_pubkey, local_signal_privkey, signed_prekey_id, onetimekey) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
+            "INSERT OR REPLACE INTO peer_mapping (nostr_pubkey, peer_signal_key, device_id, name, created_at, my_signal_key, my_signal_privkey, signed_prekey_id, peer_first_inbox) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
         )
         .bind(nostr_pubkey)
         .bind(signal_pubkey)
         .bind(device_id as i64)
         .bind(name)
         .bind(now)
-        .bind(local_signal_pubkey)
-        .bind(local_signal_privkey)
+        .bind(my_signal_key)
+        .bind(my_signal_privkey)
         .bind(signed_prekey_id.map(|id| id as i64))
-        .bind(onetimekey)
+        .bind(peer_first_inbox)
         .execute(self.pool.database())
         .await?;
         Ok(())
@@ -778,11 +778,11 @@ impl SignalManager {
     }
 
     /// Clear one-time PreKey material after session establishment.
-    /// Keeps local_signal_pubkey/privkey — they are the ephemeral store index
+    /// Keeps my_signal_key/privkey — they are the ephemeral store index
     /// needed for ALL future decrypts, not just the initial PreKey exchange.
     pub async fn clear_prekey_material(&self, nostr_pubkey: &str) -> Result<()> {
         signal_store::sqlx::query(
-            "UPDATE peer_mapping SET signed_prekey_id = NULL, onetimekey = NULL WHERE nostr_pubkey = ?"
+            "UPDATE peer_mapping SET signed_prekey_id = NULL, peer_first_inbox = NULL WHERE nostr_pubkey = ?"
         )
         .bind(nostr_pubkey)
         .execute(self.pool.database())
@@ -792,19 +792,19 @@ impl SignalManager {
     }
 
     /// Get all peer mappings including local signal keys.
-    /// Returns: Vec<(nostr_pubkey, signal_pubkey, device_id, name, local_signal_pubkey, local_signal_privkey)>
+    /// Returns: Vec<(nostr_pubkey, signal_pubkey, device_id, name, my_signal_key, my_signal_privkey)>
     pub async fn get_all_peer_mappings(&self) -> Result<Vec<(String, String, i64, String)>> {
         let full = self.get_all_peer_mappings_full().await?;
         Ok(full.into_iter().map(|(n, s, d, name, _, _, _)| (n, s, d, name)).collect())
     }
 
     /// Get all peer mappings with local signal key info.
-    /// Returns (nostr_pubkey, signal_pubkey, device_id, name, local_signal_pubkey, local_signal_privkey, onetimekey).
+    /// Returns (nostr_pubkey, signal_pubkey, device_id, name, my_signal_key, my_signal_privkey, peer_first_inbox).
 
     /// Look up a single peer mapping by nostr pubkey (avoids full table scan).
     pub async fn get_peer_mapping_by_nostr_pubkey(&self, nostr_pubkey: &str) -> Result<Option<(String, String, i64, String, Option<String>, Option<String>, Option<String>)>> {
         let row = signal_store::sqlx::query(
-            "SELECT nostr_pubkey, signal_pubkey, device_id, name, local_signal_pubkey, local_signal_privkey, onetimekey FROM peer_mapping WHERE nostr_pubkey = ?"
+            "SELECT nostr_pubkey, peer_signal_key, device_id, name, my_signal_key, my_signal_privkey, peer_first_inbox FROM peer_mapping WHERE nostr_pubkey = ?"
         )
         .bind(nostr_pubkey)
         .fetch_optional(self.pool.database())
@@ -823,7 +823,7 @@ impl SignalManager {
 
     pub async fn get_all_peer_mappings_full(&self) -> Result<Vec<(String, String, i64, String, Option<String>, Option<String>, Option<String>)>> {
         let rows = signal_store::sqlx::query(
-            "SELECT nostr_pubkey, signal_pubkey, device_id, name, local_signal_pubkey, local_signal_privkey, onetimekey FROM peer_mapping ORDER BY created_at"
+            "SELECT nostr_pubkey, peer_signal_key, device_id, name, my_signal_key, my_signal_privkey, peer_first_inbox FROM peer_mapping ORDER BY created_at"
         )
         .fetch_all(self.pool.database())
         .await?;
@@ -841,9 +841,9 @@ impl SignalManager {
         Ok(result)
     }
 
-    /// Clear onetimekey from DB after it's been used (one-time use).
-    pub async fn clear_onetimekey(&self, nostr_pubkey: &str) -> Result<()> {
-        signal_store::sqlx::query("UPDATE peer_mapping SET onetimekey = NULL WHERE nostr_pubkey = ?")
+    /// Clear peer_first_inbox from DB after it's been used (one-time use).
+    pub async fn clear_peer_first_inbox(&self, nostr_pubkey: &str) -> Result<()> {
+        signal_store::sqlx::query("UPDATE peer_mapping SET peer_first_inbox = NULL WHERE nostr_pubkey = ?")
             .bind(nostr_pubkey)
             .execute(self.pool.database())
             .await?;
@@ -861,7 +861,7 @@ impl SignalManager {
     /// Delete orphaned session rows whose address is not in any peer_mapping.signal_pubkey.
     pub async fn cleanup_orphaned_sessions(&self) -> Result<u64> {
         let result = signal_store::sqlx::query(
-            "DELETE FROM session WHERE address NOT IN (SELECT signal_pubkey FROM peer_mapping WHERE signal_pubkey != '')"
+            "DELETE FROM session WHERE address NOT IN (SELECT peer_signal_key FROM peer_mapping WHERE peer_signal_key != '')"
         )
             .execute(self.pool.database())
             .await?;
@@ -873,9 +873,12 @@ impl SignalManager {
     // -----------------------------------------------------------------------
 
     async fn ensure_receiving_addresses_table(&self) -> Result<()> {
+        // Rename old table if it exists
+        let _ = signal_store::sqlx::query("ALTER TABLE myreceivingaddresses_peer_mapping RENAME TO my_inboxes").execute(self.pool.database()).await;
+
         // Always create the new table with full schema (CREATE TABLE AS SELECT loses constraints)
         signal_store::sqlx::query(
-            "CREATE TABLE IF NOT EXISTS myreceivingaddresses_peer_mapping (
+            "CREATE TABLE IF NOT EXISTS my_inboxes (
                 address TEXT PRIMARY KEY,
                 peer_nostr_pubkey TEXT NOT NULL,
                 created_at INTEGER NOT NULL
@@ -894,11 +897,11 @@ impl SignalManager {
 
         if old_exists {
             signal_store::sqlx::query(
-                "INSERT OR IGNORE INTO myreceivingaddresses_peer_mapping SELECT * FROM address_peer_mapping"
+                "INSERT OR IGNORE INTO my_inboxes SELECT * FROM address_peer_mapping"
             ).execute(self.pool.database()).await?;
             signal_store::sqlx::query("DROP TABLE address_peer_mapping")
                 .execute(self.pool.database()).await?;
-            log::info!("Migrated address_peer_mapping → myreceivingaddresses_peer_mapping");
+            log::info!("Migrated address_peer_mapping → my_inboxes");
         }
         Ok(())
     }
@@ -908,7 +911,7 @@ impl SignalManager {
             .duration_since(std::time::UNIX_EPOCH)?
             .as_secs() as i64;
         signal_store::sqlx::query(
-            "INSERT OR REPLACE INTO myreceivingaddresses_peer_mapping (address, peer_nostr_pubkey, created_at) VALUES (?, ?, ?)"
+            "INSERT OR REPLACE INTO my_inboxes (address, peer_nostr_pubkey, created_at) VALUES (?, ?, ?)"
         )
         .bind(address)
         .bind(peer_nostr_pubkey)
@@ -920,7 +923,7 @@ impl SignalManager {
 
     pub async fn get_all_receiving_addresses(&self) -> Result<Vec<(String, String)>> {
         let rows = signal_store::sqlx::query(
-            "SELECT address, peer_nostr_pubkey FROM myreceivingaddresses_peer_mapping ORDER BY created_at"
+            "SELECT address, peer_nostr_pubkey FROM my_inboxes ORDER BY created_at"
         )
         .fetch_all(self.pool.database())
         .await?;
@@ -934,17 +937,17 @@ impl SignalManager {
     }
 
     pub async fn delete_receiving_address(&self, address: &str) -> Result<()> {
-        signal_store::sqlx::query("DELETE FROM myreceivingaddresses_peer_mapping WHERE address = ?")
+        signal_store::sqlx::query("DELETE FROM my_inboxes WHERE address = ?")
             .bind(address)
             .execute(self.pool.database())
             .await?;
         Ok(())
     }
 
-    /// Get the cached my_sending_address for a peer.
-    pub async fn get_my_sending_address(&self, nostr_pubkey: &str) -> Result<Option<String>> {
+    /// Get the cached peer_inbox for a peer.
+    pub async fn get_peer_inbox(&self, nostr_pubkey: &str) -> Result<Option<String>> {
         let row: Option<(String,)> = signal_store::sqlx::query_as(
-            "SELECT my_sending_address FROM peer_mapping WHERE nostr_pubkey = ? AND my_sending_address IS NOT NULL"
+            "SELECT peer_inbox FROM peer_mapping WHERE nostr_pubkey = ? AND peer_inbox IS NOT NULL"
         )
         .bind(nostr_pubkey)
         .fetch_optional(self.pool.database())
@@ -952,16 +955,16 @@ impl SignalManager {
         Ok(row.map(|r| r.0))
     }
 
-    /// Update the my_sending_address column for a peer in peer_mapping.
-    pub async fn save_my_sending_address(&self, nostr_pubkey: &str, address: &str) -> Result<()> {
+    /// Update the peer_inbox column for a peer in peer_mapping.
+    pub async fn save_peer_inbox(&self, nostr_pubkey: &str, address: &str) -> Result<()> {
         signal_store::sqlx::query(
-            "UPDATE peer_mapping SET my_sending_address = ? WHERE nostr_pubkey = ?"
+            "UPDATE peer_mapping SET peer_inbox = ? WHERE nostr_pubkey = ?"
         )
         .bind(address)
         .bind(nostr_pubkey)
         .execute(self.pool.database())
         .await?;
-        log::info!("Saved my_sending_address {} for peer {}", &address[..16.min(address.len())], &nostr_pubkey[..16.min(nostr_pubkey.len())]);
+        log::info!("Saved peer_inbox {} for peer {}", &address[..16.min(address.len())], &nostr_pubkey[..16.min(nostr_pubkey.len())]);
         Ok(())
     }
 

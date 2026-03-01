@@ -1030,6 +1030,7 @@ export const keychatPlugin: ChannelPlugin<ResolvedKeychatAccount> = {
       }
     },
     sendMedia: async ({ to, text, mediaUrl: incomingMediaUrl, filePath, buffer, accountId }: any) => {
+      console.log(`[keychat] outbound sendMedia called: to=${to} mediaUrl=${incomingMediaUrl} filePath=${filePath} text=${(text ?? "").slice(0, 80)} accountId=${accountId ?? "(default)"}`);
       const aid = accountId ?? DEFAULT_ACCOUNT_ID;
       const bridge = await waitForBridge(aid);
 
@@ -1063,7 +1064,9 @@ export const keychatPlugin: ChannelPlugin<ResolvedKeychatAccount> = {
 
       // Send the media URL as a message (same as Keychat app)
       const caption = text;
-      const messageText = caption ? `${mediaUrl}\n${caption}` : mediaUrl;
+      // App parses content with Uri.parse() — caption after URL breaks parsing.
+      // Send URL only as the media message; caption as a separate text message if needed.
+      const messageText = mediaUrl;
 
       // Check if target is a small group (Signal group — fan-out to each member)
       const normalizedTo = normalizePubkey(to);

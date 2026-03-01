@@ -1114,6 +1114,49 @@ impl BridgeState {
             }
         }
 
+        // Recovery: if my_sending_address is still empty after decrypt, derive from session bobAddress.
+        // At this point the per-peer store IS loaded (decrypt just used it), so session query works.
+        {
+            let peer_nostr = params.get("nostr_pubkey")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_string())
+                .or_else(|| {
+                    self.peers.values()
+                        .find(|p| p.curve25519_pk_hex == from_pubkey)
+                        .map(|p| p.nostr_pubkey.clone())
+                });
+            if let Some(ref nostr_pk) = peer_nostr {
+                let existing = signal.get_my_sending_address(nostr_pk).await.ok().flatten();
+                if existing.is_none() {
+                    // Try per-peer store first, then account default
+                    let bob_addr = if let Some(ref lsk) = local_signal_pubkey {
+                        signal.get_peer_receiving_address_by_local_key(lsk, &from_pubkey, device_id).await.ok().flatten()
+                    } else {
+                        signal.get_peer_receiving_address(account, &from_pubkey, device_id).await.ok().flatten()
+                    };
+                    if let Some(ref ba) = bob_addr {
+                        if !ba.starts_with("05") {
+                            match signal::generate_seed_from_ratchetkey_pair(ba) {
+                                Ok(derived) => {
+                                    if let Err(e) = signal.save_my_sending_address(nostr_pk, &derived).await {
+                                        log::warn!("Recovery: failed to save my_sending_address: {}", e);
+                                    } else {
+                                        log::info!("Recovery: derived my_sending_address {} from bobAddress for peer {}", &derived[..16], &nostr_pk[..16]);
+                                    }
+                                }
+                                Err(e) => log::warn!("Recovery: failed to derive from bobAddress: {}", e),
+                            }
+                        } else {
+                            log::info!("Recovery: bobAddress is raw curve25519 for peer {}, skipping", &nostr_pk[..16]);
+                        }
+                    } else {
+                        log::warn!("Recovery: no bobAddress in session for peer {}", &nostr_pk[..16]);
+                    }
+                }
+            }
+        }
+
         Ok(response)
     }
 

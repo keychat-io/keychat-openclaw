@@ -732,7 +732,7 @@ function getPeerSubscribedAddresses(accountId: string): Map<string, string[]> {
 // Minimum addresses to keep per peer after lazy cleanup (matches Keychat app: remainReceiveKeyPerRoom=2).
 // Old addresses are only cleaned up when a message is received on a newer address,
 // confirming the peer has moved on. Never delete proactively (e.g. at startup or after send).
-const REMAIN_RECEIVE_KEYS_PER_PEER = 3;
+const REMAIN_RECEIVE_KEYS_PER_PEER = 5;
 
 // ═══════════════════════════════════════════════════════════════════════════
 // MLS (Large Group) state

@@ -3014,8 +3014,8 @@ async function dispatchGroupToAgent(
   await flushDeliverBuffer();
 }
 
-/** Subscribe + persist per-peer receiving addresses derived from ratchet updates. */
-async function registerPeerReceivingAddresses(
+/** Subscribe + persist my receiving addresses derived from ratchet updates. */
+async function registerMyReceivingAddresses(
   bridge: KeychatBridgeClient,
   accountId: string,
   peerNostrPubkey: string,
@@ -3051,7 +3051,7 @@ async function handleReceivingAddressRotation(
     console.warn(`[keychat] handleReceivingAddressRotation: peerKey is falsy, skipping DB save for ${address.slice(0,16)}`);
     return;
   }
-  await registerPeerReceivingAddresses(bridge, accountId, peerKey, [address]);
+  await registerMyReceivingAddresses(bridge, accountId, peerKey, [address]);
 }
 
 /**

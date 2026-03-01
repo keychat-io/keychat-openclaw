@@ -588,10 +588,9 @@ impl BridgeState {
     ///
     /// Flow (mirrors Keychat app's SignalChatService.sendMessage):
     ///   1. Determine destination address:
-    ///      - Query Signal session for bobAddress
-    ///      - If bobAddress starts with "05" (raw curve25519), use peer's nostr pubkey
-    ///      - If peer has onetimekey and we'd send to nostr pubkey, use onetimekey instead
-    ///      - Otherwise, bobAddress is a ratchet-derived seed → hash to get receiving address
+    ///      - Check DB for cached my_sending_address (set during decrypt)
+    ///      - If no cached address, use peer's onetimekey (first message after hello)
+    ///      - Otherwise fall back to peer's nostr pubkey
     ///   2. If sending to onetimekey, wrap message in PrekeyMessageModel (contains our Signal ID + Schnorr sig)
     /// Send a profile update (type 48) to an existing peer.
     /// Params: { peer_nostr_pubkey, name?, avatar?, lightning?, bio? }

@@ -732,22 +732,28 @@ impl BridgeState {
         let mut dest_pubkey = nostr_pubkey.clone();
         let mut sending_to_onetimekey = false;
 
-        let bob_address = if let Some(ref lsk) = local_signal_pubkey {
-            signal.get_bob_address_by_local_key(lsk, &signal_pubkey, device_id).await?
+// Priority 1: Use cached my_sending_address from DB (most reliable — set during decrypt)
+        let cached_sending_addr = signal.get_my_sending_address(&nostr_pubkey).await.ok().flatten();
+        if let Some(ref addr) = cached_sending_addr {
+            log::info!("Using cached my_sending_address: {}", &addr[..16.min(addr.len())]);
+            dest_pubkey = addr.clone();
         } else {
-            signal.get_bob_address(account, &signal_pubkey, device_id).await?
-        };
-
-        if let Some(ref bob_addr) = bob_address {
-            if bob_addr.starts_with("05") {
-                // Raw curve25519 key — use nostr pubkey
-                log::info!("bobAddress is raw curve25519, using nostr pubkey");
-                dest_pubkey = nostr_pubkey.clone();
+            // Fallback: derive from Signal session's bobAddress
+            let bob_address = if let Some(ref lsk) = local_signal_pubkey {
+                signal.get_bob_address_by_local_key(lsk, &signal_pubkey, device_id).await?
             } else {
-                // Ratchet-derived — hash to get receiving address
-                let derived = crate::signal::generate_seed_from_ratchetkey_pair(bob_addr)?;
-                log::info!("Derived peer receiving address from bobAddress: {}", derived);
-                dest_pubkey = derived;
+                signal.get_bob_address(account, &signal_pubkey, device_id).await?
+            };
+
+            if let Some(ref bob_addr) = bob_address {
+                if bob_addr.starts_with("05") {
+                    log::info!("bobAddress is raw curve25519, using nostr pubkey");
+                    dest_pubkey = nostr_pubkey.clone();
+                } else {
+                    let derived = crate::signal::generate_seed_from_ratchetkey_pair(bob_addr)?;
+                    log::info!("Derived peer receiving address from bobAddress: {}", derived);
+                    dest_pubkey = derived;
+                }
             }
         }
 

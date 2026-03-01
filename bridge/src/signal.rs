@@ -932,6 +932,17 @@ impl SignalManager {
         Ok(())
     }
 
+    /// Get the cached my_sending_address for a peer.
+    pub async fn get_my_sending_address(&self, nostr_pubkey: &str) -> Result<Option<String>> {
+        let row: Option<(String,)> = signal_store::sqlx::query_as(
+            "SELECT my_sending_address FROM peer_mysendingaddress_mapping WHERE nostr_pubkey = ? AND my_sending_address IS NOT NULL"
+        )
+        .bind(nostr_pubkey)
+        .fetch_optional(self.pool.database())
+        .await?;
+        Ok(row.map(|r| r.0))
+    }
+
     /// Update the my_sending_address column for a peer in peer_mysendingaddress_mapping.
     pub async fn save_my_sending_address(&self, nostr_pubkey: &str, address: &str) -> Result<()> {
         signal_store::sqlx::query(

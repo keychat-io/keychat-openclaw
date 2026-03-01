@@ -775,15 +775,24 @@ impl BridgeState {
             log::info!("Wrapping message in PrekeyMessageModel for onetimekey delivery");
             serde_json::to_string(&pmm)?
         } else {
-            // Wrap in KeychatMessage JSON (matches Keychat app sendMessage format)
-            let keychat_msg = KeychatMessage {
-                msg_type: event_kinds::DM,
-                c: "signal".to_string(),
-                msg: Some(text.clone()),
-                name: None,
-                data: None,
-            };
-            serde_json::to_string(&keychat_msg)?
+            // Check if text is already a KeychatMessage JSON (e.g. from sendGroupMessage).
+            // If so, pass through without double-wrapping.
+            let already_km = serde_json::from_str::<KeychatMessage>(&text).ok()
+                .filter(|km| km.c == "group" || km.c == "signal" || km.c == "nip04");
+            if let Some(_) = already_km {
+                log::info!("Text is already a KeychatMessage (type={}), passing through", serde_json::from_str::<KeychatMessage>(&text).unwrap().msg_type);
+                text.clone()
+            } else {
+                // Wrap in KeychatMessage JSON (matches Keychat app sendMessage format)
+                let keychat_msg = KeychatMessage {
+                    msg_type: event_kinds::DM,
+                    c: "signal".to_string(),
+                    msg: Some(text.clone()),
+                    name: None,
+                    data: None,
+                };
+                serde_json::to_string(&keychat_msg)?
+            }
         };
 
         // Step 3: Signal encrypt (use ephemeral store if available for this peer)

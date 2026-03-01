@@ -777,11 +777,12 @@ impl SignalManager {
         }))
     }
 
-    /// Clear sensitive PreKey material after session establishment.
-    /// Keeps nostr_pubkey ↔ signal_pubkey mapping for routing.
+    /// Clear one-time PreKey material after session establishment.
+    /// Keeps local_signal_pubkey/privkey — they are the ephemeral store index
+    /// needed for ALL future decrypts, not just the initial PreKey exchange.
     pub async fn clear_prekey_material(&self, nostr_pubkey: &str) -> Result<()> {
         signal_store::sqlx::query(
-            "UPDATE peer_mapping SET local_signal_pubkey = NULL, local_signal_privkey = NULL, signed_prekey_id = NULL WHERE nostr_pubkey = ?"
+            "UPDATE peer_mapping SET signed_prekey_id = NULL, onetimekey = NULL WHERE nostr_pubkey = ?"
         )
         .bind(nostr_pubkey)
         .execute(self.pool.database())

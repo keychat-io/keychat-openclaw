@@ -426,6 +426,9 @@ class FriendRequestManager {
     flow.state = FriendRequestState.WAIT_ACCEPT;
     flow.initiatedByUs = true;
 
+    // Auto-allow this peer since WE initiated the friend request.
+    appendKeychatAllowFromStore(peerPubkey, accountId);
+
     // Protocol Step 3: accept-first is sent to A_onetimekey.
     // curve25519 identity pubkey is NOT a receiving address; subscribing to it
     // causes routing conflicts when multiple hellos are in flight.
@@ -602,6 +605,7 @@ interface PeerSession {
   deviceId: number;
   name: string;
   nostrPubkey: string;
+  localSignalPubkey?: string;
 }
 
 // Per-account maps (keyed by accountId)
@@ -1388,6 +1392,7 @@ export const keychatPlugin: ChannelPlugin<ResolvedKeychatAccount> = {
               deviceId: m.device_id,
               name: m.name,
               nostrPubkey: m.nostr_pubkey,
+              localSignalPubkey: m.local_signal_pubkey,
             });
             friendRequestManager.setSessionEstablished(account.accountId, m.nostr_pubkey);
           }
@@ -2375,11 +2380,16 @@ async function handleEncryptedDM(
             deviceId: 1,
             name: senderName,
             nostrPubkey: senderNostrId,
+            localSignalPubkey,
           };
           getPeerSessions(accountId).set(senderNostrId, newPeer);
-          // Do NOT call savePeerMapping here — it would overwrite local_signal_pubkey/privkey
-          // saved during send_hello with NULL, breaking session recovery after bridge restart.
-          // The peer_mapping row was already written by send_hello with correct ephemeral keys.
+
+          // Update DB with remote signal_pubkey so Rust send_message can find it.
+          // savePeerMapping uses INSERT OR REPLACE — we must pass the signal key.
+          // local_signal_pubkey/privkey are cleared separately by clearPrekeyMaterial below.
+          try { await bridge.savePeerMapping(senderNostrId, sigKey, 1, senderName); } catch (e) {
+            ctx.log?.error(`[${accountId}] savePeerMapping after PreKey failed: ${e}`);
+          }
           ctx.log?.info(`[${accountId}] ✅ Session established with peer ${senderNostrId.slice(0,16)}... (signal: ${sigKey.slice(0,16)}...)`);
 
           // A-role: Protocol Step 4 — received accept-first, reproduced X3DH, session established.
@@ -2394,7 +2404,11 @@ async function handleEncryptedDM(
 
           const initiatedByUs = friendRequestManager.isInitiatorSidePending(accountId, senderNostrId);
           if (initiatedByUs) {
-            await friendRequestManager.flushQueuedAfterSession(bridge, accountId, senderNostrId);
+            try {
+              await friendRequestManager.flushQueuedAfterSession(bridge, accountId, senderNostrId);
+            } catch (e) {
+              ctx.log?.error(`[${accountId}] flushQueuedAfterSession failed: ${e}`);
+            }
           }
 
           // Parse and dispatch the decrypted content

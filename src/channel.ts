@@ -2490,7 +2490,7 @@ async function handleEncryptedDM(
   let decryptResult;
   // peer is now guaranteed correct (no fallback to other peers)
   try {
-    decryptResult = await bridge.decryptMessage(peer.signalPubkey, msg.encrypted_content, msg.is_prekey, peer.localSignalPubkey, peerNostrPubkey);
+    decryptResult = await bridge.decryptMessage(peer.signalPubkey, msg.encrypted_content, msg.is_prekey);
   } catch (err) {
     // Do NOT try other peers — Signal decrypt consumes message keys (irreversible).
     // Attempting decrypt with wrong peer would corrupt their ratchet state.

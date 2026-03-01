@@ -739,13 +739,13 @@ impl BridgeState {
             dest_pubkey = addr.clone();
         } else {
             // Fallback: derive from Signal session's bobAddress
-            let bob_address = if let Some(ref lsk) = local_signal_pubkey {
-                signal.get_bob_address_by_local_key(lsk, &signal_pubkey, device_id).await?
+            let peer_recv_addr = if let Some(ref lsk) = local_signal_pubkey {
+                signal.get_peer_receiving_address_by_local_key(lsk, &signal_pubkey, device_id).await?
             } else {
-                signal.get_bob_address(account, &signal_pubkey, device_id).await?
+                signal.get_peer_receiving_address(account, &signal_pubkey, device_id).await?
             };
 
-            if let Some(ref bob_addr) = bob_address {
+            if let Some(ref bob_addr) = peer_recv_addr {
                 if bob_addr.starts_with("05") {
                     log::info!("bobAddress is raw curve25519, using nostr pubkey");
                     dest_pubkey = nostr_pubkey.clone();

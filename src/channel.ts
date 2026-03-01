@@ -879,13 +879,24 @@ export const keychatPlugin: ChannelPlugin<ResolvedKeychatAccount> = {
   },
 
   messaging: {
-    normalizeTarget: (target) => normalizePubkey(target),
+    normalizeTarget: (target) => {
+      const trimmed = target.trim();
+      if (trimmed.startsWith("group:") || trimmed.startsWith("mls-group:")) {
+        return trimmed;
+      }
+      return normalizePubkey(trimmed);
+    },
     targetResolver: {
       looksLikeId: (input) => {
         const trimmed = input.trim();
-        return trimmed.startsWith("npub1") || /^[0-9a-fA-F]{64}$/.test(trimmed);
+        return (
+          trimmed.startsWith("npub1") ||
+          /^[0-9a-fA-F]{64}$/.test(trimmed) ||
+          trimmed.startsWith("group:") ||
+          trimmed.startsWith("mls-group:")
+        );
       },
-      hint: "<npub|hex pubkey>",
+      hint: "<npub|hex pubkey|group:ID|mls-group:ID>",
     },
   },
 

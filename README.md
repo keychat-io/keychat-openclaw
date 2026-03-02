@@ -1,5 +1,10 @@
 # Keychat — OpenClaw Channel Plugin
 
+[![npm version](https://img.shields.io/npm/v/@keychat-io/keychat)](https://www.npmjs.com/package/@keychat-io/keychat)
+[![GitHub release](https://img.shields.io/github/v/release/keychat-io/keychat-openclaw)](https://github.com/keychat-io/keychat-openclaw/releases/latest)
+[![Downloads](https://img.shields.io/github/downloads/keychat-io/keychat-openclaw/total)](https://github.com/keychat-io/keychat-openclaw/releases)
+[![License: AGPL-3.0](https://img.shields.io/github/license/keychat-io/keychat-openclaw)](LICENSE)
+
 E2E encrypted AI agent communication via Keychat protocol.
 
 ## What is this?

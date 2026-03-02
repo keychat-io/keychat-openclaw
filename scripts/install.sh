@@ -5,7 +5,21 @@ set -e
 
 REPO="keychat-io/keychat-openclaw"
 INSTALL_DIR="${OPENCLAW_EXTENSIONS:-$HOME/.openclaw/extensions}/keychat"
-BINARY="$INSTALL_DIR/bridge/target/release/keychat-openclaw"
+
+# Platform-suffixed binary name
+detect_binary_suffix() {
+  local arch=$(uname -m)
+  local os=$(uname -s | tr '[:upper:]' '[:lower:]')
+  case "$os-$arch" in
+    darwin-arm64)  echo "darwin-arm64" ;;
+    darwin-x86_64) echo "darwin-x64" ;;
+    linux-x86_64)  echo "linux-x64" ;;
+    linux-aarch64) echo "linux-arm64" ;;
+    *) echo "" ;;
+  esac
+}
+SUFFIX=$(detect_binary_suffix)
+BINARY="$INSTALL_DIR/keychat-bridge-${SUFFIX}"
 
 echo "🔑 Installing Keychat"
 echo ""
@@ -66,6 +80,10 @@ spinner $NPM_PID "Installing npm packages (this may take a moment)..."
 wait $NPM_PID || true
 echo "  ✅ Dependencies installed"
 
+# ── Clean up old binary paths ──
+rm -f "$INSTALL_DIR/keychat-bridge" 2>/dev/null
+rm -f "$INSTALL_DIR/bridge/target/release/keychat-openclaw" 2>/dev/null
+
 # ── Get binary ──
 if [ -f "$BINARY" ]; then
   echo "✅ Bridge binary already exists"
@@ -77,7 +95,6 @@ else
     echo "📦 Downloading bridge binary ($ARTIFACT)..."
     echo "   ⏳ This may take 30-60 seconds depending on your connection..."
     URL="https://github.com/$REPO/releases/latest/download/$ARTIFACT"
-    mkdir -p "$(dirname "$BINARY")"
     if curl -fSL --progress-bar "$URL" -o "$BINARY" 2>&1; then
       chmod +x "$BINARY"
       echo "  ✅ Binary downloaded"
@@ -97,11 +114,16 @@ else
       spinner $BUILD_PID "Compiling Rust code (be patient)..."
       wait $BUILD_PID
       cd "$INSTALL_DIR"
-      if [ ! -f "$BINARY" ]; then
+      # Copy built binary to platform-suffixed name
+      BUILT="$INSTALL_DIR/bridge/target/release/keychat-openclaw"
+      if [ -f "$BUILT" ]; then
+        cp "$BUILT" "$BINARY"
+        chmod +x "$BINARY"
+        echo "  ✅ Built from source"
+      else
         echo "  ❌ Build failed"
         exit 1
       fi
-      echo "  ✅ Built from source"
     else
       echo "❌ No pre-compiled binary for your platform and Rust not installed."
       echo "   Install Rust: curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh"

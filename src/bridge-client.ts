@@ -106,11 +106,10 @@ export class KeychatBridgeClient {
   private signalDbPath: string | null = null;
 
   constructor(bridgePath?: string) {
-    // Default: prefer published binary (keychat-bridge), fallback to dev build path
     const baseDir = import.meta.dirname ?? __dirname;
-    const publishedBinary = join(baseDir, "..", "keychat-bridge");
+    const platformBinary = join(baseDir, "..", `keychat-bridge-${process.platform === "darwin" ? "darwin" : "linux"}-${process.arch}`);
     const devBinary = join(baseDir, "..", "bridge", "target", "release", "keychat-openclaw");
-    this.bridgePath = bridgePath ?? (existsSync(publishedBinary) ? publishedBinary : devBinary);
+    this.bridgePath = bridgePath ?? (existsSync(platformBinary) ? platformBinary : devBinary);
   }
 
   /** Start the bridge sidecar process. */
@@ -161,9 +160,12 @@ export class KeychatBridgeClient {
           } else {
             pending.resolve(response.result);
           }
+        } else {
+          console.warn(`[keychat-bridge] ⚠ RPC response id=${response.id} has no pending request (already timed out?)`);
         }
-      } catch {
-        // Ignore non-JSON lines
+      } catch (parseErr) {
+        // Log unparseable lines for debugging (may reveal merged/corrupt stdout)
+        console.error(`[keychat-bridge] ⚠ Failed to parse bridge stdout line (${line.length} chars): ${line.slice(0, 200)}${line.length > 200 ? "..." : ""}`);
       }
     });
 
@@ -274,7 +276,7 @@ export class KeychatBridgeClient {
         } catch (relayErr) {
           console.warn(`[keychat] Relay health check failed: ${relayErr}`);
         }
-      } catch {
+      } catch (parseErr) {
         console.error(`[keychat] Health check failed — killing stale process`);
         try { this.process?.kill(); } catch { /* ignore */ }
         // Auto-restart will trigger from the exit handler

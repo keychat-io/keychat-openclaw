@@ -112,6 +112,7 @@ async function uploadToS3Relay(
     access_url?: string;
   };
 
+  console.log(`[keychat] S3 presign raw: url=${params.url} access_url=${params.access_url}`);
   if (!params.url) throw new Error("S3 relay presign response missing url");
   if (!params.access_url) throw new Error("S3 relay presign response missing access_url");
 

@@ -11,8 +11,10 @@ import https from "node:https";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const REPO = "keychat-io/keychat-openclaw";
-const BINARY_DIR = join(__dirname, "..", "bridge", "target", "release");
-const BINARY_PATH = join(BINARY_DIR, "keychat-openclaw");
+const PLATFORM_SUFFIX = `${process.platform === "darwin" ? "darwin" : "linux"}-${process.arch}`;
+const BINARY_NAME = `keychat-bridge-${PLATFORM_SUFFIX}`;
+const BINARY_DIR = join(__dirname, "..");
+const BINARY_PATH = join(BINARY_DIR, BINARY_NAME);
 
 import { statSync } from "node:fs";
 
@@ -32,6 +34,16 @@ const scriptInstallDir = join(pluginDir, "..", "keychat");
 if (pluginDirName === "keychat-openclaw" && existsSync(scriptInstallDir)) {
   console.log(`[keychat] Removing conflicting script-installed copy...`);
   try { rmSync(scriptInstallDir, { recursive: true, force: true }); } catch {}
+}
+
+// Clean up old binary paths (pre-platform-suffix era)
+const oldPublishedBinary = join(pluginDir, "keychat-bridge");
+const oldDevBinary = join(pluginDir, "bridge", "target", "release", "keychat-openclaw");
+for (const old of [oldPublishedBinary, oldDevBinary]) {
+  if (existsSync(old)) {
+    console.log(`[keychat] Removing old binary: ${old}`);
+    try { rmSync(old); } catch {}
+  }
 }
 
 if (existsSync(BINARY_PATH) && currentVersion === pkgVersion) {
@@ -84,7 +96,6 @@ function download(downloadUrl) {
 }
 
 try {
-  mkdirSync(BINARY_DIR, { recursive: true });
   const buffer = await download(url);
   writeFileSync(BINARY_PATH, buffer);
   chmodSync(BINARY_PATH, 0o755);

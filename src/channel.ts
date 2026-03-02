@@ -1040,8 +1040,11 @@ export const keychatPlugin: ChannelPlugin<ResolvedKeychatAccount> = {
       if (mediaUrl && !mediaUrl.startsWith("http://") && !mediaUrl.startsWith("https://")) {
         filePath = filePath || mediaUrl;
         mediaUrl = "";
+        console.log(`[keychat] sendMedia: local path detected, filePath=${filePath}`);
       }
 
+      console.log(`[keychat] sendMedia: pre-upload — mediaUrl="${mediaUrl}" filePath="${filePath}" hasBuffer=${!!buffer}`);
+      console.log(`[keychat] sendMedia: pre-upload — mediaUrl="${mediaUrl}" filePath="${filePath}" hasBuffer=${!!buffer}`);
       // If a local file or buffer is provided (but no pre-resolved mediaUrl),
       // encrypt and upload via Blossom, then use the resulting media URL.
       if (!mediaUrl && (filePath || buffer)) {
@@ -1057,7 +1060,10 @@ export const keychatPlugin: ChannelPlugin<ResolvedKeychatAccount> = {
           const acct = resolveKeychatAccount({ cfg, accountId: aid });
           const signEvent = (content: string, tags: string[][]) =>
             bridge.signBlossomEvent(content, tags);
+          console.log(`[keychat] sendMedia: uploading ${uploadPath} to ${acct.mediaServer || "default"}`);
           const result = await encryptAndUpload(uploadPath, signEvent, acct.mediaServer);
+          console.log(`[keychat] sendMedia: upload done — ${result.mediaUrl}`);
+          console.log(`[keychat] sendMedia: upload complete — mediaUrl=${result.mediaUrl}...`);
           mediaUrl = result.mediaUrl;
         }
       }
@@ -1067,6 +1073,8 @@ export const keychatPlugin: ChannelPlugin<ResolvedKeychatAccount> = {
       // App parses content with Uri.parse() — caption after URL breaks parsing.
       // Send URL only as the media message; caption as a separate text message if needed.
       const messageText = mediaUrl;
+      console.log(`[keychat] sendMedia: final messageText=${messageText}`);
+      console.log(`[keychat] sendMedia: messageText=${messageText}${messageText.length > 120 ? "..." : ""}`);
 
       // Check if target is a small group (Signal group — fan-out to each member)
       const normalizedTo = normalizePubkey(to);

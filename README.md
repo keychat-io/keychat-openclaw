@@ -145,6 +145,17 @@ cd bridge && cargo build --release
 cargo test
 ```
 
+### Release Rules
+
+**Never publish directly.** Every release must pass integration testing on a separate Linux test server first.
+
+1. **Make changes** on the dev machine
+2. **Deploy to the test server** — install the branch/build and restart the gateway
+3. **Run integration tests** — verify friend requests, 1:1 messaging, group messaging, media send/receive, and gateway restart survival
+4. **Only after all tests pass** — bump version, tag, push, and `npm publish`
+
+This exists because shipping broken builds to npm has happened too many times. The test server catches cross-platform issues (macOS → Linux), field name mismatches, and binary packaging bugs before they reach users.
+
 ### Project Structure
 
 ```

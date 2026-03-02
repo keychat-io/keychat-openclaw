@@ -818,9 +818,35 @@ impl BridgeState {
             &encrypt_result.ciphertext,
         );
 
-        // Update receiving address if ratchet advanced
+        // Derive + Persist receiving address IMMEDIATELY after encrypt, BEFORE publish.
+        // Encrypt irreversibly consumes ratchet state; if publish fails, the address
+        // would be lost forever unless we persist it first.
+        let mut derived_receiving_address: Option<String> = None;
         if let Some(ref new_addr) = encrypt_result.my_new_inbox {
             log::info!("New receiving address from ratchet: {}", new_addr);
+            match signal::generate_seed_from_ratchetkey_pair(new_addr) {
+                Ok(derived_pubkey) => {
+                    log::info!("Derived receiving address from ratchet: {}", derived_pubkey);
+                    // Persist to DB first — must survive process restart
+                    if let Some(ref sig) = self.signal {
+                        if let Err(e) = sig.save_receiving_address(&derived_pubkey, &to_str).await {
+                            log::warn!("Failed to persist derived address to DB: {}", e);
+                        } else {
+                            log::info!("Persisted ratchet address {} for peer {} to DB", &derived_pubkey[..16], &to_str[..16]);
+                        }
+                    }
+                    // Subscribe to the new address
+                    if let Some(ref t) = self.transport {
+                        if let Err(e) = t.subscribe_additional_pubkeys(&[&derived_pubkey]).await {
+                            log::warn!("Failed to subscribe to derived address: {}", e);
+                        }
+                    }
+                    derived_receiving_address = Some(derived_pubkey);
+                }
+                Err(e) => {
+                    log::warn!("Failed to derive receiving address from ratchet key: {}", e);
+                }
+            }
         }
 
         // Step 5-6: Generate ephemeral Nostr keypair and send as Keychat DM
@@ -833,14 +859,8 @@ impl BridgeState {
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("Not connected to relays"))?;
 
-        // Tag both the destination pubkey and signal receiving address if available
-        let mut receiver_pubkeys = vec![dest_pubkey.as_str()];
-        if let Some(ref new_addr) = encrypt_result.my_new_inbox {
-            // The new_receiving_address contains ratchet info, but we need to
-            // also tag it so Keychat knows about the address rotation
-            // Format is "seed-signedPublic", we might need to hash it
-            log::info!("Ratchet new_receiving_address: {}", new_addr);
-        }
+        // Tag the destination pubkey
+        let receiver_pubkeys = vec![dest_pubkey.as_str()];
 
         let event_id = transport
             .send_keychat_dm(&sender_keys, &receiver_pubkeys, &b64_ciphertext)
@@ -854,33 +874,6 @@ impl BridgeState {
             // Clear from DB too so it's not restored on restart
             if let Some(sig) = self.signal.as_ref() {
                 let _ = sig.clear_peer_first_inbox(&to_str).await;
-            }
-        }
-
-        // Auto-subscribe to ratchet-derived receiving address
-        let mut derived_receiving_address: Option<String> = None;
-        if let Some(ref new_addr) = encrypt_result.my_new_inbox {
-            match signal::generate_seed_from_ratchetkey_pair(new_addr) {
-                Ok(derived_pubkey) => {
-                    log::info!("Derived receiving address from ratchet: {}", derived_pubkey);
-                    if let Some(ref t) = self.transport {
-                        if let Err(e) = t.subscribe_additional_pubkeys(&[&derived_pubkey]).await {
-                            log::warn!("Failed to subscribe to derived address: {}", e);
-                        }
-                    }
-                    // Persist to DB atomically — must survive process restart
-                    if let Some(ref sig) = self.signal {
-                        if let Err(e) = sig.save_receiving_address(&derived_pubkey, &to_str).await {
-                            log::warn!("Failed to persist derived address to DB: {}", e);
-                        } else {
-                            log::info!("Persisted ratchet address {} for peer {} to DB", &derived_pubkey[..16], &to_str[..16]);
-                        }
-                    }
-                    derived_receiving_address = Some(derived_pubkey);
-                }
-                Err(e) => {
-                    log::warn!("Failed to derive receiving address from ratchet key: {}", e);
-                }
             }
         }
 

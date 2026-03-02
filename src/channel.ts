@@ -1783,12 +1783,12 @@ async function handleFriendRequestInner(
   }
 
   ctx.log?.info(
-    `[${accountId}] Session established with peer ${hello.peer_nostr_pubkey.slice(0,16)}... (signal: ${hello.peer_signal_key.slice(0,16)}...)`,
+    `[${accountId}] Session established with peer ${hello.peer_nostr_pubkey.slice(0,16)}... (signal: ${hello.peer_signal_pubkey.slice(0,16)}...)`,
   );
 
   // Store/update peer session info for this specific nostr pubkey only
   const peer: PeerSession = {
-    signalPubkey: hello.peer_signal_key,
+    signalPubkey: hello.peer_signal_pubkey,
     deviceId: hello.device_id,
     name: hello.peer_name,
     nostrPubkey: hello.peer_nostr_pubkey,
@@ -1796,14 +1796,14 @@ async function handleFriendRequestInner(
   };
 
   // Clean up only the legacy restore entry for THIS peer's signal pubkey (if it was keyed wrong)
-  if (getPeerSessions(accountId).has(hello.peer_signal_key) && hello.peer_signal_key !== hello.peer_nostr_pubkey) {
-    getPeerSessions(accountId).delete(hello.peer_signal_key);
-    ctx.log?.info(`[${accountId}] Cleaned up legacy signal-keyed entry: ${hello.peer_signal_key}`);
+  if (getPeerSessions(accountId).has(hello.peer_signal_pubkey) && hello.peer_signal_pubkey !== hello.peer_nostr_pubkey) {
+    getPeerSessions(accountId).delete(hello.peer_signal_pubkey);
+    ctx.log?.info(`[${accountId}] Cleaned up legacy signal-keyed entry: ${hello.peer_signal_pubkey}`);
   }
 
   // Update getAddressToPeer entries that pointed to the old signal key to use nostr key
   for (const [addr, oldPeerKey] of getAddressToPeer(accountId)) {
-    if (oldPeerKey === hello.peer_signal_key) {
+    if (oldPeerKey === hello.peer_signal_pubkey) {
       getAddressToPeer(accountId).set(addr, hello.peer_nostr_pubkey);
     }
   }

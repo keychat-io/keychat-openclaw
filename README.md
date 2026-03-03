@@ -59,15 +59,14 @@ Ask your agent in any existing channel (Telegram, Discord, webchat, etc.):
 
 > "What's your Keychat ID?"
 
-The agent will reply with its **Keychat ID** (npub), **contact link**, and **QR code**:
+The agent will reply with its **Keychat ID** (npub) and **contact link**:
 
 ```
 🔑 Keychat ID: npub1...
 📱 Add contact: https://www.keychat.io/u/?k=npub1...
-🖼️ QR code image
 ```
 
-Open the [Keychat app](https://keychat.io) → tap the link, paste the npub, or scan the QR code to add as contact. If `dmPolicy` is `open`, the agent accepts immediately. The default policy is `pairing`, which requires owner approval.
+Open the [Keychat app](https://keychat.io) → tap the link or paste the npub to add as contact. If `dmPolicy` is `open`, the agent accepts immediately. The default policy is `pairing`, which requires owner approval.
 
 ## Configuration
 

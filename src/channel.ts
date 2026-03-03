@@ -55,7 +55,7 @@ import {
   type MlsGroupInfo,
   type MlsCommitResult,
 } from "./bridge-client.js";
-import { storeMnemonic, retrieveMnemonic } from "./keychain.js";
+import { storeMnemonic, retrieveMnemonic, checkKeychainAvailable, autoFixKeychain } from "./keychain.js";
 import { parseMediaUrl, downloadAndDecrypt, encryptAndUpload } from "./media.js";
 import { transcribe, type SttConfig } from "./stt.js";
 import { join } from "node:path";
@@ -1376,6 +1376,32 @@ export const keychatPlugin: ChannelPlugin<ResolvedKeychatAccount> = {
           ctx.log?.info(`[${account.accountId}] Mnemonic removed from config`);
         }
       } else {
+        // Before generating a new identity, ensure system keychain is available.
+        // Without keychain, the mnemonic cannot be stored securely and the identity
+        // would be lost on restart, causing a new identity every time.
+        let keychainCheck = checkKeychainAvailable();
+        if (!keychainCheck.available) {
+          // Try to auto-install keychain dependencies
+          ctx.log?.info(`[${account.accountId}] System keychain unavailable (${keychainCheck.reason}), attempting auto-fix...`);
+          const fixed = autoFixKeychain(ctx.log);
+          if (fixed) {
+            keychainCheck = checkKeychainAvailable();
+          }
+          if (!keychainCheck.available) {
+            const msg = [
+              `[${account.accountId}] ❌ Cannot generate Keychat identity: system keychain unavailable.`,
+              `Reason: ${keychainCheck.reason}`,
+              ``,
+              `🔧 ${keychainCheck.hint}`,
+              ``,
+              `The mnemonic (private key) must be stored in the system keychain for security.`,
+              `Keychat will not start until the keychain is available.`,
+            ].join("\n");
+            ctx.log?.error(msg);
+            throw new Error(`System keychain unavailable: ${keychainCheck.reason}`);
+          }
+        }
+
         // Generate new identity
         info = await bridge.generateIdentity();
         ctx.log?.info(
@@ -1383,7 +1409,10 @@ export const keychatPlugin: ChannelPlugin<ResolvedKeychatAccount> = {
         );
 
         // Store mnemonic in system keychain ONLY (never config, never plain file)
-        await storeMnemonic(account.accountId, info.mnemonic!);
+        const stored = await storeMnemonic(account.accountId, info.mnemonic!);
+        if (!stored) {
+          ctx.log?.error(`[${account.accountId}] ❌ Failed to store mnemonic in keychain. Identity will be lost on restart.`);
+        }
 
         // Do NOT write publicKey/npub to config — it triggers gateway hot-reload loops.
         // npub is exposed via setStatus() for the Control UI instead.

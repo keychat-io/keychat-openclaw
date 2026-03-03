@@ -68,27 +68,6 @@ The agent will reply with its **Keychat ID** (npub) and **contact link**:
 
 Open the [Keychat app](https://keychat.io) → tap the link or paste the npub to add as contact. The first person to add the agent as a contact becomes its owner. Any subsequent contact requests require owner approval.
 
-## Configuration
-
-All options go under `channels.keychat` in your OpenClaw config (`~/.openclaw/openclaw.json`):
-
-| Option             | Type     | Default                      | Description                                               |
-| ------------------ | -------- | ---------------------------- | --------------------------------------------------------- |
-| `enabled`          | boolean  | `true`                       | Enable/disable the Keychat channel                        |
-| `name`             | string   | —                            | Display name for this account                             |
-| `relays`           | string[] | `["wss://relay.keychat.io"]` | Nostr relay WebSocket URLs                                |
-| `dmPolicy`         | enum     | `"pairing"`                     | Access policy: `pairing`, `allowlist`, `open`, `disabled` |
-| `allowFrom`        | string[] | `[]`                         | Allowed sender pubkeys (npub or hex)                      |
-| `lightningAddress` | string   | —                            | Lightning address for receiving payments                  |
-| `nwcUri`           | string   | —                            | Nostr Wallet Connect URI for wallet access                |
-
-### DM Policies
-
-- **`open`**: Anyone can message the agent
-- **`pairing`**: New contacts require owner approval via OpenClaw (default)
-- **`allowlist`**: Only pubkeys in `allowFrom` can communicate
-- **`disabled`**: No inbound messages accepted
-
 ## Lightning Wallet
 
 ### Lightning Address (receive-only)

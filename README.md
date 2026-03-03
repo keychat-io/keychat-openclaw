@@ -66,7 +66,7 @@ The agent will reply with its **Keychat ID** (npub) and **contact link**:
 📱 Add contact: https://www.keychat.io/u/?k=npub1...
 ```
 
-Open the [Keychat app](https://keychat.io) → tap the link or paste the npub to add as contact. If `dmPolicy` is `open`, the agent accepts immediately. The default policy is `pairing`, which requires owner approval.
+Open the [Keychat app](https://keychat.io) → tap the link or paste the npub to add as contact. The first person to add the agent as a contact becomes its owner. Any subsequent contact requests require owner approval.
 
 ## Configuration
 

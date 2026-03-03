@@ -87,6 +87,7 @@ async function encryptFile(filePath: string): Promise<{
 
   // PKCS7 pad before encryption to match Keychat app's Dart encrypt package behavior
   const padded = pkcs7Pad(fileBytes);
+  console.log(`[keychat][media] encryptFile: original=${fileBytes.length} padded=${padded.length} (PKCS7 active)`);
   const cipher = createCipheriv("aes-256-ctr", key, iv);
   const encrypted = Buffer.concat([cipher.update(padded), cipher.final()]);
 

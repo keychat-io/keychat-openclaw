@@ -55,7 +55,11 @@ openclaw gateway restart
 
 ## Add Your Agent as a Keychat Contact
 
-After `openclaw gateway restart`, the agent will send you its **Keychat ID**, **contact link**, and **QR code** in your active chat (Telegram, webchat, etc.):
+Ask your agent in any existing channel (Telegram, Discord, webchat, etc.):
+
+> "What's your Keychat ID?"
+
+The agent will reply with its **Keychat ID** (npub), **contact link**, and **QR code**:
 
 ```
 🔑 Keychat ID: npub1...
@@ -64,8 +68,6 @@ After `openclaw gateway restart`, the agent will send you its **Keychat ID**, **
 ```
 
 Open the [Keychat app](https://keychat.io) → tap the link, paste the npub, or scan the QR code to add as contact. If `dmPolicy` is `open`, the agent accepts immediately. The default policy is `pairing`, which requires owner approval.
-
-**Can't find the public key?** Just ask your agent in chat: "What's your Keychat ID?"
 
 ## Configuration
 

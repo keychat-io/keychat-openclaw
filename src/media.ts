@@ -3,6 +3,35 @@ import { writeFile, mkdir, readFile } from "node:fs/promises";
 import { join, extname, basename } from "node:path";
 import { MEDIA_DIR } from "./paths.js";
 
+/**
+ * PKCS7 padding/unpadding — required for compatibility with Keychat app.
+ *
+ * The Dart `encrypt` package's `Encrypter(AES(key, mode: AESMode.ctr))` applies
+ * PKCS7 padding by default (even though CTR is a stream cipher), because the
+ * internal implementation uses PaddedBlockCipherImpl. We must match this behavior
+ * exactly for cross-compatibility.
+ */
+const AES_BLOCK_SIZE = 16;
+
+/** Add PKCS7 padding to match Keychat app's Encrypter behavior. */
+function pkcs7Pad(data: Buffer): Buffer {
+  const padLen = AES_BLOCK_SIZE - (data.length % AES_BLOCK_SIZE);
+  const padding = Buffer.alloc(padLen, padLen);
+  return Buffer.concat([data, padding]);
+}
+
+/** Remove PKCS7 padding after decryption. */
+function pkcs7Unpad(data: Buffer): Buffer {
+  if (data.length === 0) return data;
+  const padLen = data[data.length - 1];
+  if (padLen < 1 || padLen > AES_BLOCK_SIZE) return data; // invalid padding, return as-is
+  // Verify all padding bytes are correct
+  for (let i = data.length - padLen; i < data.length; i++) {
+    if (data[i] !== padLen) return data; // invalid padding, return as-is
+  }
+  return data.subarray(0, data.length - padLen);
+}
+
 export interface KeychatMediaInfo {
   url: string;
   kctype: string;
@@ -56,8 +85,10 @@ async function encryptFile(filePath: string): Promise<{
   const key = randomBytes(32);
   const iv = randomBytes(16);
 
+  // PKCS7 pad before encryption to match Keychat app's Dart encrypt package behavior
+  const padded = pkcs7Pad(fileBytes);
   const cipher = createCipheriv("aes-256-ctr", key, iv);
-  const encrypted = Buffer.concat([cipher.update(fileBytes), cipher.final()]);
+  const encrypted = Buffer.concat([cipher.update(padded), cipher.final()]);
 
   // base64-encoded SHA256 of encrypted bytes (matches Keychat app's base64Hash mode)
   const sha256 = createHash("sha256").update(encrypted).digest("base64");
@@ -282,7 +313,9 @@ export async function downloadAndDecrypt(media: KeychatMediaInfo): Promise<strin
   const keyBuf = Buffer.from(media.key, "base64");
   const ivBuf = Buffer.from(media.iv, "base64");
   const decipher = createDecipheriv("aes-256-ctr", keyBuf, ivBuf);
-  const decrypted = Buffer.concat([decipher.update(encrypted)]);
+  // Decrypt then strip PKCS7 padding (added by Keychat app's Dart encrypt package)
+  const decryptedRaw = Buffer.concat([decipher.update(encrypted), decipher.final()]);
+  const decrypted = pkcs7Unpad(decryptedRaw);
 
   await mkdir(MEDIA_DIR, { recursive: true });
   const filename = media.sourceName || `${Date.now()}.${media.suffix}`;

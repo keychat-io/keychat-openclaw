@@ -1331,7 +1331,7 @@ export const keychatPlugin: ChannelPlugin<ResolvedKeychatAccount> = {
       ctx.log?.info(`[${account.accountId}] Signal DB initialized`);
 
       // 3. Generate or restore identity
-      // Priority: config mnemonic > keychain mnemonic > generate new
+      // Priority: config mnemonic > keychain > mnemonic file > generate new
       let info: AccountInfo;
       let mnemonic = account.mnemonic;
       if (!mnemonic) {
@@ -1342,49 +1342,51 @@ export const keychatPlugin: ChannelPlugin<ResolvedKeychatAccount> = {
           ctx.log?.info(`[${account.accountId}] Mnemonic retrieved from system keychain`);
         }
       }
+      if (!mnemonic) {
+        // Try mnemonic file (fallback for systems without keychain)
+        const { mnemonicPath } = await import("./paths.js");
+        const mPath = mnemonicPath(account.accountId);
+        if (existsSync(mPath)) {
+          mnemonic = readFileSync(mPath, "utf-8").trim();
+          ctx.log?.info(`[${account.accountId}] Mnemonic retrieved from file`);
+        }
+      }
 
       if (mnemonic) {
         // Restore from mnemonic
         info = await bridge.importIdentity(mnemonic);
         ctx.log?.info(`[${account.accountId}] Identity restored from mnemonic`);
 
-        // Always persist publicKey/npub to config so they're accessible without the bridge running.
-        // Serialize writes and read file directly (loadConfig may return stale cache).
-        await configWriteLock(async () => {
-          const { readFileSync, writeFileSync } = await import("node:fs");
-          const { homedir } = await import("node:os");
-          const cfgPath = `${homedir()}/.openclaw/openclaw.json`;
-          const cfg = JSON.parse(readFileSync(cfgPath, "utf-8"));
-          const keychatCfg = cfg?.channels?.keychat ?? {};
-          const accounts = keychatCfg.accounts ?? {};
-          const acct = accounts[account.accountId] ?? {};
-          if (acct.publicKey !== info.pubkey_hex || acct.npub !== info.pubkey_npub) {
-            acct.publicKey = info.pubkey_hex;
-            acct.npub = info.pubkey_npub;
-            accounts[account.accountId] = acct;
-            keychatCfg.accounts = accounts;
-            cfg.channels.keychat = keychatCfg;
-            writeFileSync(cfgPath, JSON.stringify(cfg, null, 4) + "\n", "utf-8");
-            ctx.log?.info(`[${account.accountId}] publicKey/npub persisted to config`);
-          }
-        });
+        // Note: npub/publicKey are NOT written to config here to avoid triggering
+        // gateway hot-reload loops (config change → restart channel → write config → loop).
+        // npub is exposed via setStatus() for the Control UI instead.
 
-        // If mnemonic was in config, try migrating to keychain
+        // If mnemonic was in config, migrate to keychain/file and remove from config
         if (account.mnemonic) {
           const stored = await storeMnemonic(account.accountId, mnemonic);
-          if (stored) {
-            ctx.log?.info(`[${account.accountId}] Mnemonic migrated to system keychain`);
-            // Remove mnemonic from config (keep only publicKey/npub)
+          if (!stored) {
+            // Fallback: save to mnemonic file
+            const { mnemonicPath } = await import("./paths.js");
+            writeFileSync(mnemonicPath(account.accountId), mnemonic, { mode: 0o600 });
+          }
+          ctx.log?.info(`[${account.accountId}] Mnemonic migrated to ${stored ? "system keychain" : "mnemonic file"}`);
+          // Remove mnemonic from config (it should never be in config)
+          await configWriteLock(async () => {
             const cfg = runtime.config.loadConfig();
             const channels = (cfg.channels ?? {}) as Record<string, unknown>;
             const keychatCfg = (channels.keychat ?? {}) as Record<string, unknown>;
-            const { mnemonic: _removed, ...keychatCfgClean } = keychatCfg;
+            // Remove from top-level keychat config (legacy cleanup)
+            delete (keychatCfg as any).mnemonic;
+            // Remove from account level
+            const accounts = ((keychatCfg.accounts ?? {}) as Record<string, Record<string, unknown>>);
+            const acct = accounts[account.accountId];
+            if (acct) delete acct.mnemonic;
             await runtime.config.writeConfigFile({
               ...cfg,
-              channels: { ...channels, keychat: keychatCfgClean },
+              channels: { ...channels, keychat: keychatCfg },
             });
-            ctx.log?.info(`[${account.accountId}] Mnemonic removed from config file`);
-          }
+          });
+          ctx.log?.info(`[${account.accountId}] Mnemonic removed from config`);
         }
       } else {
         // Generate new identity
@@ -1393,25 +1395,19 @@ export const keychatPlugin: ChannelPlugin<ResolvedKeychatAccount> = {
           `[${account.accountId}] New Keychat identity generated: ${info.pubkey_npub}`,
         );
 
-        // Store mnemonic in keychain first, fall back to config
+        // Store mnemonic: keychain first, fallback to mnemonic file (NEVER config)
         const stored = await storeMnemonic(account.accountId, info.mnemonic!);
+        if (!stored) {
+          // Fallback: write to dedicated mnemonic file with restrictive permissions
+          const { mnemonicPath } = await import("./paths.js");
+          const mPath = mnemonicPath(account.accountId);
+          writeFileSync(mPath, info.mnemonic!, { mode: 0o600 });
+          ctx.log?.info(`[${account.accountId}] Mnemonic saved to file (keychain unavailable)`);
+        }
 
-        // Persist keys to config (mnemonic only if keychain failed)
-        const cfg = runtime.config.loadConfig();
-        const channels = (cfg.channels ?? {}) as Record<string, unknown>;
-        const keychatCfg = (channels.keychat ?? {}) as Record<string, unknown>;
-        await runtime.config.writeConfigFile({
-          ...cfg,
-          channels: {
-            ...channels,
-            keychat: {
-              ...keychatCfg,
-              ...(stored ? {} : { mnemonic: info.mnemonic }),
-              publicKey: info.pubkey_hex,
-              npub: info.pubkey_npub,
-            },
-          },
-        });
+        // Do NOT write publicKey/npub to config — it triggers gateway hot-reload loops.
+        // npub is exposed via setStatus() for the Control UI instead.
+        // Mnemonic is already stored in keychain or file above.
       }
 
       accountInfoCache.set(account.accountId, info);

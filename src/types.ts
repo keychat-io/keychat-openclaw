@@ -99,7 +99,9 @@ export function resolveKeychatAccount(opts: {
       : channelCfg;
 
   const enabled = acctCfg?.enabled !== false;
-  const mnemonic = acctCfg?.mnemonic?.trim();
+  // Fallback: if account-level mnemonic is missing, try top-level channelCfg
+  // (handles migration from single-account to multi-account config)
+  const mnemonic = acctCfg?.mnemonic?.trim() || (acctCfg !== channelCfg ? channelCfg?.mnemonic?.trim() : undefined);
   const configured = true; // Always configured — identity auto-generates
 
   return {

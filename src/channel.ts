@@ -711,8 +711,31 @@ function scheduleSummaryNotification(ctx: { log?: { info: (...a: any[]) => void;
         lines.push(`Send all agent contact info to the user on their active channel so they can add them in Keychat app.`);
       }
 
-      const { sendSystemEvent } = await import("./notify.js");
+      const { sendSystemEvent, sendToActiveChannels } = await import("./notify.js");
       await sendSystemEvent(lines.join("\n"));
+
+      // Also proactively push QR + link to all recently active channels (Discord, Telegram, etc.)
+      // so the user gets the message even if the system event fires without a clear channel context.
+      if (contacts.length > 0) {
+        // Build a concise direct message for channel push
+        const directLines: string[] = [];
+        for (const c of needsNotify) {
+          const name = resolveDisplayName(cfg, c.accountId);
+          directLines.push(
+            `🔑 Keychat agent "${name}" is ready!`,
+            `npub: ${c.npub}`,
+            `📱 Add contact: ${c.contactUrl}`,
+          );
+          // Also try to send per-account QR image
+          const { qrCodePath } = await import("./paths.js");
+          const qrPath = qrCodePath(c.accountId);
+          sendToActiveChannels({
+            message: directLines.join("\n"),
+            qrPath: existsSync(qrPath) ? qrPath : undefined,
+          }).catch(() => {/* best effort */});
+          directLines.length = 0;
+        }
+      }
 
       // Mark all as notified
       for (const c of needsNotify) {

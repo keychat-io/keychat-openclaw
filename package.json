@@ -1,6 +1,6 @@
 {
   "name": "@keychat-io/keychat",
-  "version": "0.1.55",
+  "version": "0.1.56",
   "description": "Keychat — E2E encrypted chat + Lightning wallet for OpenClaw agents",
   "license": "AGPL-3.0",
   "repository": {

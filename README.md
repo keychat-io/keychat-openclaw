@@ -68,26 +68,6 @@ The agent will reply with its **Keychat ID** (npub) and **contact link**:
 
 Open the [Keychat app](https://keychat.io) → tap the link or paste the npub to add as contact. The first person to add the agent as a contact becomes its owner. Any subsequent contact requests require owner approval.
 
-## Lightning Wallet
-
-### Lightning Address (receive-only)
-
-```json
-{ "lightningAddress": "user@walletofsatoshi.com" }
-```
-
-### Nostr Wallet Connect (NWC)
-
-For full wallet access (create invoices, check balance, verify payments):
-
-```json
-{ "nwcUri": "nostr+walletconnect://pubkey?relay=wss://...&secret=..." }
-```
-
-Generate an NWC connection string from your wallet app (Keychat, Alby Hub, Mutiny, Coinos, etc.).
-
-**Security note**: The agent can receive payments freely. Outbound payments require owner approval.
-
 ## Architecture
 
 ```

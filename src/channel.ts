@@ -1860,9 +1860,8 @@ async function handleFriendRequestInner(
     if (ownerPubkey && ownerPubkey !== msg.from_pubkey) {
       const peerPrefix = msg.from_pubkey.slice(0, 8);
       const notifyText = `🔔 ${hello.peer_name || "Unknown"} (${peerPrefix}) wants to add your agent as a friend. Do you agree?`;
-      const notifyMsg = JSON.stringify({ type: 100, c: "signal", msg: notifyText });
       try {
-        await retrySend(() => bridge.sendMessage(ownerPubkey, notifyMsg));
+        await retrySend(() => bridge.sendMessage(ownerPubkey, notifyText));
         ctx.log?.info(`[${accountId}] Notified owner ${ownerPubkey.slice(0, 12)} about friend request from ${msg.from_pubkey.slice(0, 12)}`);
       } catch (e) {
         ctx.log?.error(`[${accountId}] Failed to notify owner about friend request: ${e}`);
@@ -2771,6 +2770,7 @@ async function handleEncryptedDM(
     }
     // Check if this is the owner approving/rejecting a friend request
     const ownerPk = getOwnerPubkey(accountId, runtime);
+    ctx.log?.info(`[${accountId}] Approval check: ownerPk=${ownerPk?.slice(0,16)}, sender=${peerNostrPubkey.slice(0,16)}, match=${ownerPk === peerNostrPubkey}, text="${displayText.slice(0,20)}"`);
     if (ownerPk && peerNostrPubkey === ownerPk) {
       const approveMatch = displayText.match(/^(同意|approve|好)\s*(.*)/i);
       const rejectMatch = displayText.match(/^(拒绝|reject|不)\s*(.*)/i);
@@ -2778,6 +2778,7 @@ async function handleEncryptedDM(
         const isApprove = !!approveMatch;
         const nameHint = (approveMatch?.[2] || rejectMatch?.[2] || "").trim();
         const pending = listKeychatPairingRequests(accountId);
+        ctx.log?.info(`[${accountId}] Approval: isApprove=${isApprove}, nameHint="${nameHint}", pending=${JSON.stringify(pending)}`);
         // Find matching request by name or pubkey prefix
         let matched: { pubkey: string; name?: string } | null = null;
         if (pending.length === 1 && !nameHint) {
@@ -2793,18 +2794,14 @@ async function handleEncryptedDM(
             appendKeychatAllowFromStore(matched.pubkey, accountId);
             removePairingRequest(matched.pubkey, accountId);
             // Notify the approved peer
-            const approveMsg = JSON.stringify({ type: 100, c: "signal", msg: `✅ Your request has been approved! Feel free to chat.` });
-            try { await retrySend(() => bridge.sendMessage(matched.pubkey, approveMsg)); } catch { /* best effort */ }
+            try { await retrySend(() => bridge.sendMessage(matched.pubkey, `✅ Your request has been approved! Feel free to chat.`)); } catch { /* best effort */ }
             // Confirm to owner
-            const confirmMsg = JSON.stringify({ type: 100, c: "signal", msg: `✅ Approved ${matched.name || matched.pubkey.slice(0, 8)}.` });
-            try { await retrySend(() => bridge.sendMessage(ownerPk, confirmMsg)); } catch { /* best effort */ }
+            try { await retrySend(() => bridge.sendMessage(ownerPk, `✅ Approved ${matched.name || matched.pubkey.slice(0, 8)}.`)); } catch { /* best effort */ }
             ctx.log?.info(`[${accountId}] Owner approved friend request from ${matched.pubkey.slice(0, 12)}`);
           } else {
             removePairingRequest(matched.pubkey, accountId);
-            const rejectMsg = JSON.stringify({ type: 100, c: "signal", msg: `❌ Your request has been rejected.` });
-            try { await retrySend(() => bridge.sendMessage(matched.pubkey, rejectMsg)); } catch { /* best effort */ }
-            const confirmMsg = JSON.stringify({ type: 100, c: "signal", msg: `❌ Rejected ${matched.name || matched.pubkey.slice(0, 8)}.` });
-            try { await retrySend(() => bridge.sendMessage(ownerPk, confirmMsg)); } catch { /* best effort */ }
+            try { await retrySend(() => bridge.sendMessage(matched.pubkey, `❌ Your request has been rejected.`)); } catch { /* best effort */ }
+            try { await retrySend(() => bridge.sendMessage(ownerPk, `❌ Rejected ${matched.name || matched.pubkey.slice(0, 8)}.`)); } catch { /* best effort */ }
             ctx.log?.info(`[${accountId}] Owner rejected friend request from ${matched.pubkey.slice(0, 12)}`);
           }
           return;

@@ -9,7 +9,12 @@ E2E encrypted AI agent communication via Keychat protocol.
 
 ## What is this?
 
-This plugin gives your OpenClaw agent a **sovereign identity** — a self-generated Public Key ID (Nostr keypair) — and enables **end-to-end encrypted communication** using the Signal Protocol over Nostr relays.
+This plugin gives your OpenClaw agent four things no other channel can:
+
+- **Sovereign identity** — The agent generates its own cryptographic keypair. No platform account, no API token from a third party. The agent *is* its public key.
+- **Sovereign network** — Messages travel through Nostr relays that anyone can run and the agent can switch at will. No single company controls the transport layer.
+- **End-to-end encryption** — Every message is encrypted with the Signal Protocol (Double Ratchet). Relay operators, network intermediaries, and even the plugin author cannot read the content.
+- **Metadata protection** — Both sending and receiving addresses rotate with almost every message via ratchet-derived Nostr keypairs, making it extremely difficult to correlate traffic to a specific agent or conversation.
 
 ## Install
 

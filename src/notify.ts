@@ -33,6 +33,108 @@ export async function sendSystemEvent(text: string, timeoutMs = 10_000): Promise
 }
 
 /**
+ * Push a message directly to the webchat UI via gateway's chat.inject WebSocket method.
+ * This bypasses the agent and shows the message immediately in the webchat UI.
+ *
+ * Falls back silently if the gateway is not reachable or webchat has no active session.
+ */
+export async function sendToWebchat(opts: {
+  message: string;
+  sessionKey?: string;   // defaults to "agent:main:main"
+  timeoutMs?: number;
+}): Promise<void> {
+  const timeoutMs = opts.timeoutMs ?? 8_000;
+  const sessionKey = opts.sessionKey ?? "agent:main:main";
+
+  // Read gateway config from the openclaw config file
+  let gatewayUrl: string;
+  let gatewayToken: string | undefined;
+  try {
+    const { readFileSync } = await import("node:fs");
+    const { homedir } = await import("node:os");
+    const cfgPath = `${homedir()}/.openclaw/openclaw.json`;
+    const cfg = JSON.parse(readFileSync(cfgPath, "utf-8"));
+    const port: number = cfg?.gateway?.port ?? 18789;
+    gatewayUrl = cfg?.gateway?.remote?.url ?? `ws://127.0.0.1:${port}`;
+    gatewayToken = cfg?.gateway?.auth?.token;
+  } catch {
+    return; // can't read config, skip
+  }
+
+  return new Promise<void>((resolve) => {
+    const timer = setTimeout(() => { ws?.terminate?.(); resolve(); }, timeoutMs);
+
+    let ws: any;
+    let resolved = false;
+    const done = () => { if (!resolved) { resolved = true; clearTimeout(timer); resolve(); } };
+
+    (async () => {
+      try {
+        // Import ws module (available globally in OpenClaw's node)
+        const { default: WebSocket } = await import("ws");
+        ws = new WebSocket(gatewayUrl);
+
+        ws.on("error", () => done());
+        ws.on("close", () => done());
+
+        ws.on("open", () => {
+          // Send connect challenge-response is needed, but the challenge arrives as first event
+        });
+
+        let seqId = 1;
+        const sendReq = (method: string, params: unknown) => {
+          const id = String(seqId++);
+          ws.send(JSON.stringify({ type: "req", id, method, params }));
+          return id;
+        };
+
+        let connectId: string | null = null;
+        let injected = false;
+
+        ws.on("message", (raw: Buffer | string) => {
+          try {
+            const frame = JSON.parse(raw.toString());
+
+            // Handle connect challenge
+            if (frame.type === "event" && frame.event === "connect.challenge") {
+              connectId = sendReq("connect", {
+                minProtocol: 3,
+                maxProtocol: 3,
+                client: { id: "cli", version: "0", platform: "node", mode: "cli", instanceId: "keychat-notify" },
+                role: "operator",
+                scopes: ["operator.admin"],
+                auth: gatewayToken ? { token: gatewayToken } : undefined,
+              });
+              return;
+            }
+
+            // Handle connect response → inject message
+            if (frame.type === "res" && frame.id === connectId && !injected) {
+              if (!frame.ok) { ws.terminate(); done(); return; }
+              injected = true;
+              const injectId = sendReq("chat.inject", {
+                sessionKey,
+                message: opts.message,
+                label: "keychat-notify",
+              });
+              // Wait for inject response
+              ws.once("message", (raw2: Buffer | string) => {
+                try { JSON.parse(raw2.toString()); } catch { /* ignore */ }
+                ws.terminate();
+                done();
+              });
+            }
+          } catch { /* ignore parse errors */ }
+        });
+
+      } catch {
+        done();
+      }
+    })();
+  });
+}
+
+/**
  * Parse active channel sessions and send the Keychat identity directly
  * to each recently active non-keychat channel (Discord, Telegram, etc.).
  *

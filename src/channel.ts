@@ -660,6 +660,16 @@ function markProcessed(bridge: KeychatBridgeClient, accountId: string, eventId: 
   }
   bridge.markEventProcessed(eventId, createdAt).catch(() => {/* best effort */});
 }
+// Simple async mutex for serializing config file writes (avoids read-modify-write races)
+let _configLockPromise: Promise<void> = Promise.resolve();
+async function configWriteLock<T>(fn: () => Promise<T>): Promise<T> {
+  const prev = _configLockPromise;
+  let releaseFn: () => void;
+  _configLockPromise = new Promise<void>(r => { releaseFn = r; });
+  await prev;
+  try { return await fn(); } finally { releaseFn!(); }
+}
+
 // per-account: peerNostrPubkey → subscribed receiving addresses (oldest..newest)
 const peerSubscribedAddressesByAccount = new Map<string, Map<string, string[]>>();
 
@@ -711,8 +721,30 @@ function scheduleSummaryNotification(ctx: { log?: { info: (...a: any[]) => void;
         lines.push(`Send all agent contact info to the user on their active channel so they can add them in Keychat app.`);
       }
 
-      const { sendSystemEvent, sendToActiveChannels } = await import("./notify.js");
+      const { sendSystemEvent, sendToActiveChannels, sendToWebchat } = await import("./notify.js");
       await sendSystemEvent(lines.join("\n"));
+
+      // Also push directly to webchat UI (no agent run needed)
+      const webchatLines: string[] = [];
+      if (contacts.length === 1) {
+        const c = needsNotify[0] ?? contacts[0];
+        const name = resolveDisplayName(cfg, c.accountId);
+        webchatLines.push(
+          `🔑 Keychat agent **"${name}"** is ready!`,
+          ``,
+          `**npub:** \`${c.npub}\``,
+          `**Contact link:** ${c.contactUrl}`,
+          ``,
+          `Share the contact link or QR code with users so they can add this agent in the Keychat app.`,
+        );
+      } else {
+        webchatLines.push(`🔑 **${contacts.length} Keychat agents** are ready:`);
+        for (const c of needsNotify) {
+          const name = resolveDisplayName(cfg, c.accountId);
+          webchatLines.push(``, `**${name}:** \`${c.npub}\``, `Link: ${c.contactUrl}`);
+        }
+      }
+      sendToWebchat({ message: webchatLines.join("\n") }).catch(() => {/* best effort */});
 
       // Also proactively push QR + link to all recently active channels (Discord, Telegram, etc.)
       // so the user gets the message even if the system event fires without a clear channel context.
@@ -1316,6 +1348,27 @@ export const keychatPlugin: ChannelPlugin<ResolvedKeychatAccount> = {
         info = await bridge.importIdentity(mnemonic);
         ctx.log?.info(`[${account.accountId}] Identity restored from mnemonic`);
 
+        // Always persist publicKey/npub to config so they're accessible without the bridge running.
+        // Serialize writes and read file directly (loadConfig may return stale cache).
+        await configWriteLock(async () => {
+          const { readFileSync, writeFileSync } = await import("node:fs");
+          const { homedir } = await import("node:os");
+          const cfgPath = `${homedir()}/.openclaw/openclaw.json`;
+          const cfg = JSON.parse(readFileSync(cfgPath, "utf-8"));
+          const keychatCfg = cfg?.channels?.keychat ?? {};
+          const accounts = keychatCfg.accounts ?? {};
+          const acct = accounts[account.accountId] ?? {};
+          if (acct.publicKey !== info.pubkey_hex || acct.npub !== info.pubkey_npub) {
+            acct.publicKey = info.pubkey_hex;
+            acct.npub = info.pubkey_npub;
+            accounts[account.accountId] = acct;
+            keychatCfg.accounts = accounts;
+            cfg.channels.keychat = keychatCfg;
+            writeFileSync(cfgPath, JSON.stringify(cfg, null, 4) + "\n", "utf-8");
+            ctx.log?.info(`[${account.accountId}] publicKey/npub persisted to config`);
+          }
+        });
+
         // If mnemonic was in config, try migrating to keychain
         if (account.mnemonic) {
           const stored = await storeMnemonic(account.accountId, mnemonic);
@@ -1412,6 +1465,7 @@ export const keychatPlugin: ChannelPlugin<ResolvedKeychatAccount> = {
 
       ctx.setStatus({
         accountId: account.accountId,
+        npub: info.pubkey_npub,
         publicKey: info.pubkey_hex,
         contactUrl,
         qrCodePath: qrPath,

@@ -3,6 +3,24 @@
  * Isolated to keep child_process out of channel.ts (avoids scanner warnings there).
  */
 
+/**
+ * Build an exec env that ensures the current node binary's directory is in PATH.
+ * Fixes the `/usr/bin/env: 'node': No such file or directory` error when the
+ * gateway is started by systemd with a minimal PATH (e.g. nvm node not in PATH).
+ */
+function buildExecEnv(): NodeJS.ProcessEnv {
+  // Derive node bin dir from process.execPath without needing path.dirname import
+  // e.g. "/home/user/.nvm/versions/node/v22/bin/node" → "/home/user/.nvm/versions/node/v22/bin"
+  const lastSlash = process.execPath.lastIndexOf("/");
+  const nodeBinDir: string = lastSlash >= 0 ? process.execPath.slice(0, lastSlash) : "";
+  const currentPath: string = process.env.PATH ?? "";
+  const pathParts = currentPath.split(":").filter(Boolean);
+  if (nodeBinDir && !pathParts.includes(nodeBinDir)) {
+    pathParts.unshift(nodeBinDir);
+  }
+  return { ...process.env, PATH: pathParts.join(":") };
+}
+
 export async function sendSystemEvent(text: string, timeoutMs = 10_000): Promise<void> {
   const { execFile } = await import("node:child_process");
   const { promisify } = await import("node:util");
@@ -11,7 +29,7 @@ export async function sendSystemEvent(text: string, timeoutMs = 10_000): Promise
     "system", "event",
     "--text", text,
     "--mode", "now",
-  ], { timeout: timeoutMs });
+  ], { timeout: timeoutMs, env: buildExecEnv() });
 }
 
 /**
@@ -41,9 +59,11 @@ export async function sendToActiveChannels(opts: {
   // Channels with no external target in the session key (skip these)
   const SKIP_CHANNELS = new Set(["keychat", "webchat", "main", "internal", "cron", "system"]);
 
+  const execEnv = buildExecEnv();
+
   let sessions: Array<{ key: string; updatedAt: number }> = [];
   try {
-    const { stdout } = await execFileAsync("openclaw", ["sessions", "--json"], { timeout: 10_000 });
+    const { stdout } = await execFileAsync("openclaw", ["sessions", "--json"], { timeout: 10_000, env: execEnv });
     const parsed = JSON.parse(stdout);
     sessions = Array.isArray(parsed) ? parsed : (parsed.sessions ?? []);
   } catch {
@@ -89,7 +109,7 @@ export async function sendToActiveChannels(opts: {
       if (qrExists && opts.qrPath) {
         args.push("--media", opts.qrPath);
       }
-      await execFileAsync("openclaw", args, { timeout: timeoutMs });
+      await execFileAsync("openclaw", args, { timeout: timeoutMs, env: execEnv });
     } catch {
       // Best-effort: skip channels that fail
     }

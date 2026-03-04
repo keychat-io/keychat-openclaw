@@ -963,7 +963,7 @@ export const keychatPlugin: ChannelPlugin<ResolvedKeychatAccount> = {
     deliveryMode: "direct",
     textChunkLimit: 4000,
     sendText: async ({ to, text, accountId }) => {
-      console.log(`[keychat] outbound sendText called: to=${to} text=${(text ?? "").slice(0, 80)} accountId=${accountId ?? "(default)"}`);
+      console.log(`[keychat] outbound sendText called: to=${to} textLen=${(text ?? "").length} accountId=${accountId ?? "(default)"}`);
       const aid = accountId ?? DEFAULT_ACCOUNT_ID;
       const bridge = await waitForBridge(aid);
       const core = getKeychatRuntime();
@@ -1090,7 +1090,7 @@ export const keychatPlugin: ChannelPlugin<ResolvedKeychatAccount> = {
       }
     },
     sendMedia: async ({ to, text, mediaUrl: incomingMediaUrl, filePath, buffer, accountId }: any) => {
-      console.log(`[keychat] outbound sendMedia called: to=${to} mediaUrl=${incomingMediaUrl} filePath=${filePath} text=${(text ?? "").slice(0, 80)} accountId=${accountId ?? "(default)"}`);
+      console.log(`[keychat] outbound sendMedia called: to=${to} mediaUrl=${incomingMediaUrl} filePath=${filePath} textLen=${(text ?? "").length} accountId=${accountId ?? "(default)"}`);
       const aid = accountId ?? DEFAULT_ACCOUNT_ID;
       const bridge = await waitForBridge(aid);
 
@@ -1133,8 +1133,8 @@ export const keychatPlugin: ChannelPlugin<ResolvedKeychatAccount> = {
       // App parses content with Uri.parse() — caption after URL breaks parsing.
       // Send URL only as the media message; caption as a separate text message if needed.
       const messageText = mediaUrl;
-      console.log(`[keychat] sendMedia: final messageText=${messageText}`);
-      console.log(`[keychat] sendMedia: messageText=${messageText}${messageText.length > 120 ? "..." : ""}`);
+      console.log(`[keychat] sendMedia: final messageTextLen=${messageText.length}`);
+      console.log(`[keychat] sendMedia: messageTextLen=${messageText.length}`);
 
       // Check if target is a small group (Signal group — fan-out to each member)
       const normalizedTo = normalizePubkey(to);
@@ -1722,8 +1722,18 @@ export const keychatPlugin: ChannelPlugin<ResolvedKeychatAccount> = {
             markProcessed(bridge, account.accountId, msg.event_id, msg.created_at);
 
             // Check if this is an MLS group message (arrived_at matches a known listen key)
-            const mlsGroupId = msg.arrived_at ? mlsListenKeyToGroup.get(msg.arrived_at) : undefined;
+            let mlsGroupId = msg.arrived_at ? mlsListenKeyToGroup.get(msg.arrived_at) : undefined;
             ctx.log?.info(`[${account.accountId}] Kind:1059 routing: arrived_at=${msg.arrived_at ?? 'null'}, inner_kind=${msg.inner_kind ?? 'null'}, mlsGroupId=${mlsGroupId ?? 'null'}, mlsKeys=[${[...mlsListenKeyToGroup.keys()].map(k => k.slice(0, 12)).join(',')}]`);
+
+            // Fallback: check addressToPeer for MLS mapping
+            if (!mlsGroupId && msg.arrived_at) {
+              const peerTag = getAddressToPeer(account.accountId).get(msg.arrived_at);
+              if (peerTag?.startsWith("mls:")) {
+                mlsGroupId = peerTag.slice(4);
+                mlsListenKeyToGroup.set(msg.arrived_at, mlsGroupId);
+                ctx.log?.info(`[${account.accountId}] MLS fallback: restored listen key mapping for group ${mlsGroupId}`);
+              }
+            }
 
             if (mlsGroupId && !msg.inner_kind) {
               // ── MLS group message (raw kind:1059, not Gift Wrap) ──
@@ -2138,7 +2148,7 @@ async function handleMlsGroupMessage(
         }
 
         // Route to agent
-        ctx.log?.info(`[${accountId}] MLS dispatching to agent: group="${groupName}", sender=${decrypted.sender.slice(0, 12)}, text=${mlsDisplayText.slice(0, 80)}`);
+        ctx.log?.info(`[${accountId}] MLS dispatching to agent: group="${groupName}", sender=${decrypted.sender.slice(0, 12)}, textLen=${mlsDisplayText.length}`);
         await dispatchMlsGroupToAgent(
           bridge, accountId, groupId, groupName,
           decrypted.sender, decrypted.sender.slice(0, 12),
@@ -2864,7 +2874,7 @@ async function handleEncryptedDM(
     }
     // Check if this is the owner approving/rejecting a friend request
     const ownerPk = getOwnerPubkey(accountId, runtime);
-    ctx.log?.info(`[${accountId}] Approval check: ownerPk=${ownerPk?.slice(0,16)}, sender=${peerNostrPubkey.slice(0,16)}, match=${ownerPk === peerNostrPubkey}, text="${displayText.slice(0,20)}"`);
+    ctx.log?.info(`[${accountId}] Approval check: ownerPk=${ownerPk?.slice(0,16)}, sender=${peerNostrPubkey.slice(0,16)}, match=${ownerPk === peerNostrPubkey}`);
     if (ownerPk && peerNostrPubkey === ownerPk) {
       const approveMatch = displayText.match(/^(同意|approve|好)\s*(.*)/i);
       const rejectMatch = displayText.match(/^(拒绝|reject|不)\s*(.*)/i);

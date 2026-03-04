@@ -744,7 +744,9 @@ function scheduleSummaryNotification(ctx: { log?: { info: (...a: any[]) => void;
           webchatLines.push(``, `**${name}:** \`${c.npub}\``, `Link: ${c.contactUrl}`);
         }
       }
-      sendToWebchat({ message: webchatLines.join("\n") }).catch(() => {/* best effort */});
+      sendToWebchat({ message: webchatLines.join("\n") }).catch((e: any) => {
+        ctx.log?.warn?.(`sendToWebchat failed: ${e?.message ?? e}`);
+      });
 
       // Also proactively push QR + link to all recently active channels (Discord, Telegram, etc.)
       // so the user gets the message even if the system event fires without a clear channel context.
@@ -764,7 +766,9 @@ function scheduleSummaryNotification(ctx: { log?: { info: (...a: any[]) => void;
           sendToActiveChannels({
             message: directLines.join("\n"),
             qrPath: existsSync(qrPath) ? qrPath : undefined,
-          }).catch(() => {/* best effort */});
+          }).catch((e: any) => {
+            ctx.log?.warn?.(`sendToActiveChannels failed: ${e?.message ?? e}`);
+          });
           directLines.length = 0;
         }
       }
@@ -1725,7 +1729,7 @@ export const keychatPlugin: ChannelPlugin<ResolvedKeychatAccount> = {
               await handleMlsGroupMessage(bridge, account.accountId, mlsGroupId, msg, ctx, runtime);
             } else if (msg.inner_kind === 444) {
               // ── MLS Welcome (Gift Wrap with inner kind:444) ──
-              await handleMlsWelcome(bridge, account.accountId, msg, ctx, runtime);
+              await handleMlsWelcome(bridge, account.accountId, msg, ctx, runtime, cfg, account.name);
             } else {
               // ── Gift Wrap (friend request / hello) ──
               await handleFriendRequest(bridge, account.accountId, msg, ctx, runtime);
@@ -2010,7 +2014,7 @@ async function handleNip04Message(
       // Send hello to the group
       try {
         const helloText = `😃 Hi, I am Agent`;
-        const ghResult = await bridge.sendGroupMessage(joinResult.group_id, helloText, { subtype: 14 });
+        const ghResult = await bridge.sendGroupMessage(joinResult.group_id, helloText);
         if (ghResult.member_rotations?.length) {
           for (const rot of ghResult.member_rotations) {
             await handleReceivingAddressRotation(bridge, accountId, { my_new_inbox: rot.my_new_inbox } as any, rot.member);
@@ -2214,6 +2218,8 @@ async function handleMlsWelcome(
   msg: InboundMessage,
   ctx: { log?: { info: (m: string) => void; error: (m: string) => void; warn?: (m: string) => void }; setStatus: (s: Record<string, unknown> | any) => void },
   runtime: ReturnType<typeof getKeychatRuntime>,
+  cfg?: any,
+  accountName?: string,
 ): Promise<void> {
   try {
     const welcomeContent = msg.text || msg.encrypted_content;
@@ -2251,10 +2257,11 @@ async function handleMlsWelcome(
 
     // Send greeting: self_update produces a commit that must be published + committed
     try {
+      const displayName = resolveDisplayName(cfg, accountId, accountName);
       const greetingResult = await bridge.mlsSelfUpdate(groupId, {
-        name: "Agent",
-        msg: "[System] Hello everyone! I am Agent",
-        status: "confirmed",
+        name: displayName,
+        msg: `[System] Hello everyone! I am ${displayName}`,
+        status: "invited",
       });
 
       // Publish the commit to the group's listen key
@@ -2776,7 +2783,7 @@ async function handleEncryptedDM(
         // Send hello to the group
         const helloText = `😃 Hi, I am Agent`;
         try {
-          const ghResult2 = await bridge.sendGroupMessage(joinResult.group_id, helloText, { subtype: 14 });
+          const ghResult2 = await bridge.sendGroupMessage(joinResult.group_id, helloText);
           if (ghResult2.member_rotations?.length) {
             for (const rot of ghResult2.member_rotations) {
               await handleReceivingAddressRotation(bridge, accountId, { my_new_inbox: rot.my_new_inbox } as any, rot.member);
@@ -3197,7 +3204,8 @@ export async function updateGroupKey(
   const { listen_key: oldKey } = await bridge.mlsGetListenKey(groupId);
 
   // 2. Generate self-update commit
-  const result = await bridge.mlsSelfUpdate(groupId, { name: "Agent" });
+  const displayName = resolveDisplayName(undefined, accountId, undefined);
+  const result = await bridge.mlsSelfUpdate(groupId, { name: displayName });
 
   // 3. Publish commit to the OLD listen key
   await bridge.mlsPublishToGroup(oldKey, result.encrypted_msg);

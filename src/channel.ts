@@ -1486,6 +1486,16 @@ export const keychatPlugin: ChannelPlugin<ResolvedKeychatAccount> = {
 
       activeBridges.set(account.accountId, bridge);
 
+      // Report startup to health monitor — prevents premature stale-socket restart.
+      // Also start a periodic keepalive so idle periods (e.g. overnight) don't
+      // trigger stale-socket restarts. The health monitor threshold is 30 min;
+      // we ping every 20 min to stay well within that window.
+      ctx.setStatus({ lastEventAt: Date.now(), connected: true });
+      const HEALTH_KEEPALIVE_MS = 20 * 60 * 1000; // 20 minutes
+      const healthKeepaliveTimer = setInterval(() => {
+        ctx.setStatus({ lastEventAt: Date.now() });
+      }, HEALTH_KEEPALIVE_MS);
+
       // 7. Restore peer sessions and receiving addresses from DB
       console.log(`[keychat] [${account.accountId}] Step 7: restoring peer sessions...`);
       try {
@@ -1700,6 +1710,8 @@ export const keychatPlugin: ChannelPlugin<ResolvedKeychatAccount> = {
       // Set up inbound message handler
       bridge.setInboundHandler(async (msg: InboundMessage) => {
         try {
+          // Report event to health monitor — prevents stale-socket restarts
+          ctx.setStatus({ lastEventAt: Date.now() });
           ctx.log?.info(`[${account.accountId}] ▶ Inbound handler invoked: kind=${msg.event_kind} from=${msg.from_pubkey?.slice(0,16)} to=${msg.arrived_at?.slice(0,16)} prekey=${msg.is_prekey} event=${msg.event_id?.slice(0,16)}`);
           // Deduplicate events — check in-memory first, then DB
           if (msg.event_id) {
@@ -1781,6 +1793,8 @@ export const keychatPlugin: ChannelPlugin<ResolvedKeychatAccount> = {
       // to stay pending while the channel is running — resolving triggers auto-restart)
       const abortSignal = (ctx as any).abortSignal as AbortSignal | undefined;
       if (abortSignal) {
+        // Clean up health keepalive timer on channel shutdown
+        abortSignal.addEventListener("abort", () => clearInterval(healthKeepaliveTimer), { once: true });
         await new Promise<void>((resolve) => {
           if (abortSignal.aborted) { resolve(); return; }
           abortSignal.addEventListener("abort", () => resolve(), { once: true });

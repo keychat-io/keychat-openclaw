@@ -1051,7 +1051,8 @@ export const keychatPlugin: ChannelPlugin<ResolvedKeychatAccount> = {
         // Protocol Step 1: No session yet, send friend request (kind:1059 Gift Wrap).
         console.log(`[keychat] No session with ${normalizedTo}, initiating hello...`);
         try {
-          const name = "Keychat Agent";
+          const helloConfig = core.config.loadConfig();
+          const name = resolveDisplayName(helloConfig, aid);
           await friendRequestManager.ensureOutgoingHelloAndHandshakeSubscriptions(
             bridge,
             aid,
@@ -1740,7 +1741,7 @@ export const keychatPlugin: ChannelPlugin<ResolvedKeychatAccount> = {
             if (msg.nip04_decrypted) {
               // NIP-04 pre-decrypted message (e.g., group invite via Nip4ChatService)
               // Skip Signal decrypt — plaintext is already in msg.text / msg.encrypted_content
-              await handleNip04Message(bridge, account.accountId, msg, ctx, runtime);
+              await handleNip04Message(bridge, account.accountId, msg, ctx, runtime, cfg, account.name);
             } else {
               // Signal-encrypted message — decrypt consumes message keys, cannot retry
               await handleEncryptedDM(bridge, account.accountId, msg, ctx, runtime);
@@ -1983,6 +1984,8 @@ async function handleNip04Message(
   msg: InboundMessage,
   ctx: { log?: { info: (m: string) => void; error: (m: string) => void; warn?: (m: string) => void }; setStatus: (s: Record<string, unknown> | any) => void },
   runtime: ReturnType<typeof getKeychatRuntime>,
+  cfg?: any,
+  accountName?: string,
 ): Promise<void> {
   const plaintext = msg.text || msg.encrypted_content;
   ctx.log?.info(`[${accountId}] NIP-04 decrypted message from ${msg.from_pubkey?.slice(0,16)}... (${plaintext.length} chars)`);
@@ -2013,7 +2016,8 @@ async function handleNip04Message(
 
       // Send hello to the group
       try {
-        const helloText = `😃 Hi, I am Agent`;
+        const groupDisplayName = resolveDisplayName(cfg, accountId, accountName);
+        const helloText = `😃 Hi, I am ${groupDisplayName}`;
         const ghResult = await bridge.sendGroupMessage(joinResult.group_id, helloText);
         if (ghResult.member_rotations?.length) {
           for (const rot of ghResult.member_rotations) {
@@ -2781,7 +2785,8 @@ async function handleEncryptedDM(
         ctx.log?.info(`[${accountId}] Joined group ${joinResult.group_id} (${joinResult.member_count} members)`);
 
         // Send hello to the group
-        const helloText = `😃 Hi, I am Agent`;
+        const groupDisplayName2 = resolveDisplayName(cfg, accountId, accountName);
+        const helloText = `😃 Hi, I am ${groupDisplayName2}`;
         try {
           const ghResult2 = await bridge.sendGroupMessage(joinResult.group_id, helloText);
           if (ghResult2.member_rotations?.length) {
@@ -3363,7 +3368,8 @@ export async function resetPeerSession(
   // 4. Optionally re-send hello
   if (resendHello) {
     try {
-      const name = "Keychat Agent";
+      const resetCfg = getKeychatRuntime().config.loadConfig();
+      const name = resolveDisplayName(resetCfg, accountId);
       await friendRequestManager.ensureOutgoingHelloAndHandshakeSubscriptions(
         bridge,
         accountId,

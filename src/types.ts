@@ -3,7 +3,8 @@ import type { OpenClawConfig } from "openclaw/plugin-sdk";
 export interface KeychatAccountConfig {
   enabled?: boolean;
   name?: string;
-  /** Mnemonic phrase for identity (auto-generated on first start) */
+  /** @deprecated Legacy only — mnemonic should be in system keychain, not config.
+   *  If present, it will be migrated to keychain and deleted from config on startup. */
   mnemonic?: string;
   /** Public key hex (derived from mnemonic) */
   publicKey?: string;
@@ -34,7 +35,8 @@ export interface ResolvedKeychatAccount {
   name?: string;
   enabled: boolean;
   configured: boolean;
-  /** Mnemonic for identity restoration */
+  /** @deprecated Legacy only — mnemonic lives in system keychain, not in memory.
+   *  Present only during config→keychain migration for existing users. */
   mnemonic?: string;
   /** Nostr public key hex */
   publicKey: string;
@@ -99,8 +101,7 @@ export function resolveKeychatAccount(opts: {
       : channelCfg;
 
   const enabled = acctCfg?.enabled !== false;
-  // Fallback: if account-level mnemonic is missing, try top-level channelCfg
-  // (handles migration from single-account to multi-account config)
+  // Legacy: mnemonic may still be in config for old installations → will be migrated to keychain on init
   const mnemonic = acctCfg?.mnemonic?.trim() || (acctCfg !== channelCfg ? channelCfg?.mnemonic?.trim() : undefined);
   const configured = true; // Always configured — identity auto-generates
 

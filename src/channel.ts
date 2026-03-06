@@ -1336,50 +1336,35 @@ export const keychatPlugin: ChannelPlugin<ResolvedKeychatAccount> = {
       ctx.log?.info(`[${account.accountId}] Signal DB initialized`);
 
       // 3. Generate or restore identity
-      // Priority: config mnemonic (legacy migration) > system keychain > generate new
+      // Mnemonic source: system keychain (only). Config mnemonic is legacy → migrate & delete.
       let info: AccountInfo;
-      let mnemonic = account.mnemonic;
-      if (!mnemonic) {
-        // Try keychain
-        const keychainMnemonic = await retrieveMnemonic(account.accountId);
-        if (keychainMnemonic) {
-          mnemonic = keychainMnemonic;
-          ctx.log?.info(`[${account.accountId}] Mnemonic retrieved from system keychain`);
-        }
+
+      // Legacy migration: if mnemonic is still in config, move it to keychain first
+      if (account.mnemonic) {
+        await storeMnemonic(account.accountId, account.mnemonic);
+        ctx.log?.info(`[${account.accountId}] Legacy mnemonic migrated to system keychain`);
+        await configWriteLock(async () => {
+          const cfg = runtime.config.loadConfig();
+          const channels = (cfg.channels ?? {}) as Record<string, unknown>;
+          const keychatCfg = (channels.keychat ?? {}) as Record<string, unknown>;
+          delete (keychatCfg as any).mnemonic;
+          const accounts = ((keychatCfg.accounts ?? {}) as Record<string, Record<string, unknown>>);
+          const acct = accounts[account.accountId];
+          if (acct) delete acct.mnemonic;
+          await runtime.config.writeConfigFile({
+            ...cfg,
+            channels: { ...channels, keychat: keychatCfg },
+          });
+        });
+        ctx.log?.info(`[${account.accountId}] Mnemonic removed from config`);
       }
 
+      // Read mnemonic from keychain (the only legitimate source)
+      const mnemonic = await retrieveMnemonic(account.accountId);
 
       if (mnemonic) {
-        // Restore from mnemonic
         info = await bridge.importIdentity(mnemonic);
-        ctx.log?.info(`[${account.accountId}] Identity restored from mnemonic`);
-
-        // Note: npub/publicKey are NOT written to config here to avoid triggering
-        // gateway hot-reload loops (config change → restart channel → write config → loop).
-        // npub is exposed via setStatus() for the Control UI instead.
-
-        // If mnemonic was in config (legacy), migrate to keychain and remove from config
-        if (account.mnemonic) {
-          await storeMnemonic(account.accountId, mnemonic);
-          ctx.log?.info(`[${account.accountId}] Mnemonic migrated to system keychain`);
-          // Remove mnemonic from config (it should never be in config)
-          await configWriteLock(async () => {
-            const cfg = runtime.config.loadConfig();
-            const channels = (cfg.channels ?? {}) as Record<string, unknown>;
-            const keychatCfg = (channels.keychat ?? {}) as Record<string, unknown>;
-            // Remove from top-level keychat config (legacy cleanup)
-            delete (keychatCfg as any).mnemonic;
-            // Remove from account level
-            const accounts = ((keychatCfg.accounts ?? {}) as Record<string, Record<string, unknown>>);
-            const acct = accounts[account.accountId];
-            if (acct) delete acct.mnemonic;
-            await runtime.config.writeConfigFile({
-              ...cfg,
-              channels: { ...channels, keychat: keychatCfg },
-            });
-          });
-          ctx.log?.info(`[${account.accountId}] Mnemonic removed from config`);
-        }
+        ctx.log?.info(`[${account.accountId}] Identity restored from keychain`);
       } else {
         // Before generating a new identity, ensure system keychain is available.
         // Without keychain, the mnemonic cannot be stored securely and the identity
@@ -1652,8 +1637,17 @@ export const keychatPlugin: ChannelPlugin<ResolvedKeychatAccount> = {
         }
       }
 
-      // Cache init args for auto-restart
-      bridge.setInitArgs({ dbPath, mnemonic: account.mnemonic, relays: account.relays });
+      // Cache init args for auto-restart (mnemonic excluded — read from keychain on restart).
+      bridge.setInitArgs({ dbPath, relays: account.relays });
+
+      // Register keychain lookup for restart — mnemonic is always read from keychain, never cached.
+      bridge.setMnemonicResolver(async () => {
+        try {
+          return await retrieveMnemonic(account.accountId);
+        } catch {
+          return null;
+        }
+      });
 
       // Register post-restart hook to restore peer sessions and subscriptions
       bridge.setRestartHook(async () => {

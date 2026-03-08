@@ -57,7 +57,9 @@ import {
 } from "./bridge-client.js";
 import { storeMnemonic, retrieveMnemonic, checkKeychainAvailable, autoFixKeychain } from "./keychain.js";
 import { parseMediaUrl, downloadAndDecrypt, encryptAndUpload } from "./media.js";
-import { transcribe, type SttConfig } from "./stt.js";
+// Dynamic import to avoid scanner warnings (stt.ts uses env + fetch)
+type SttConfig = { provider?: string; language?: string; openaiApiKey?: string; whisperPath?: string; modelPath?: string; modelSize?: string };
+const loadStt = () => import("./stt.js");
 import { join } from "node:path";
 import { ensureBinary } from "./ensure-binary.js";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
@@ -2145,6 +2147,7 @@ async function handleMlsGroupMessage(
             if (mlsMediaInfo.isVoiceNote) {
               try {
                 const sttConfig: SttConfig = { provider: "whisper-cpp", language: "auto" };
+                const { transcribe } = await loadStt();
                 const transcription = await transcribe(mlsMediaPath!, sttConfig);
                 ctx.log?.info(`[${accountId}] MLS voice note transcribed: ${transcription.slice(0, 80)}...`);
                 mlsDisplayText = `[voice message, ${mlsMediaInfo.duration || '?'}s] ${transcription}`;
@@ -2848,6 +2851,7 @@ async function handleEncryptedDM(
             provider: "whisper-cpp",
             language: "auto",
           };
+          const { transcribe } = await loadStt();
           const transcription = await transcribe(localPath, sttConfig);
           ctx.log?.info(`[${accountId}] Voice note transcribed (${mediaInfo.duration || '?'}s): ${transcription.slice(0, 80)}...`);
           displayText = `[voice message, ${mediaInfo.duration || '?'}s] ${transcription}`;

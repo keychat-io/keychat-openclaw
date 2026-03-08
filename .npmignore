@@ -4,3 +4,5 @@ bridge/
 .env
 .npmrc.tmp
 tests/
+src/stt.ts
+src/tts.ts

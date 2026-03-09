@@ -102,7 +102,7 @@ export class KeychatBridgeClient {
   private restartAttempts = 0;
   private maxRestartAttempts = 5;
   private restartDelayMs = 1000;
-  private initArgs: { dbPath?: string; mnemonic?: string; relays?: string[] } | null = null;
+  private initArgs: { dbPath?: string; relays?: string[] } | null = null;
   private signalDbPath: string | null = null;
 
   constructor(bridgePath?: string) {
@@ -203,8 +203,9 @@ export class KeychatBridgeClient {
     await this.call("ping");
   }
 
-  /** Cache init params so the bridge can replay them on restart. */
-  setInitArgs(args: { dbPath?: string; mnemonic?: string; relays?: string[] }): void {
+  /** Cache init params so the bridge can replay them on restart.
+   *  NOTE: mnemonic is NOT cached here — it must be read from keychain on restart. */
+  setInitArgs(args: { dbPath?: string; relays?: string[] }): void {
     this.initArgs = args;
   }
 
@@ -222,6 +223,14 @@ export class KeychatBridgeClient {
   }
 
   /** Restart the bridge after an unexpected crash. */
+  /** Optional callback to resolve mnemonic from keychain (defense-in-depth for restart). */
+  private mnemonicResolver: (() => Promise<string | null>) | null = null;
+
+  /** Register a fallback mnemonic resolver (e.g. keychain lookup). */
+  setMnemonicResolver(resolver: () => Promise<string | null>): void {
+    this.mnemonicResolver = resolver;
+  }
+
   private async restart(): Promise<void> {
     if (this.restartAttempts >= this.maxRestartAttempts) {
       console.error(`[keychat] Max restart attempts (${this.maxRestartAttempts}) reached, giving up`);
@@ -233,7 +242,16 @@ export class KeychatBridgeClient {
       // Replay init sequence
       if (this.initArgs) {
         if (this.initArgs.dbPath) await this.init(this.initArgs.dbPath);
-        if (this.initArgs.mnemonic) await this.importIdentity(this.initArgs.mnemonic);
+        // Always read mnemonic from keychain — never cache secrets in memory
+        if (!this.mnemonicResolver) {
+          throw new Error("No mnemonic resolver registered — cannot restore identity");
+        }
+        const mnemonic = await this.mnemonicResolver();
+        if (mnemonic) {
+          await this.importIdentity(mnemonic);
+        } else {
+          throw new Error("Keychain returned no mnemonic — cannot restore identity");
+        }
         if (this.initArgs.relays) await this.connect(this.initArgs.relays);
       }
       // Restore peer sessions and subscriptions via hook
@@ -248,25 +266,41 @@ export class KeychatBridgeClient {
       console.error(`[keychat] Restart successful (sessions restored)`);
     } catch (err) {
       console.error(`[keychat] Restart failed: ${err}`);
+      // Schedule retry with exponential backoff (exit handler won't fire since start() succeeded)
+      if (this.restartAttempts < this.maxRestartAttempts) {
+        const delay = Math.min(this.restartDelayMs * Math.pow(2, this.restartAttempts), 30000);
+        console.error(`[keychat] Will retry restart in ${delay}ms (attempt ${this.restartAttempts + 1}/${this.maxRestartAttempts})`);
+        setTimeout(() => this.restart(), delay);
+      }
     }
   }
 
   /** Periodic health check — ping the bridge and restart if unresponsive. */
   private healthCheckInterval: ReturnType<typeof setInterval> | null = null;
   private readonly HEALTH_CHECK_INTERVAL_MS = 60_000; // 1 minute
-  private readonly HEALTH_CHECK_TIMEOUT_MS = 10_000;
+  private readonly HEALTH_CHECK_TIMEOUT_MS = 60_000;  // 60s — generous to avoid false kills during message bursts
+  private consecutiveHealthFailures = 0;
+  private readonly HEALTH_KILL_THRESHOLD = 2; // require 2 consecutive failures before killing
 
   /** Start periodic health checks. */
   startHealthCheck(): void {
     this.stopHealthCheck();
+    this.consecutiveHealthFailures = 0;
     this.healthCheckInterval = setInterval(async () => {
       if (!this.process) return;
+      // Skip health check if the bridge is actively processing RPC calls —
+      // a busy bridge is not a stuck bridge.
+      if (this.pending.size > 0) {
+        this.consecutiveHealthFailures = 0;
+        return;
+      }
       try {
         const pingPromise = this.call("ping");
         const timeoutPromise = new Promise((_, reject) =>
           setTimeout(() => reject(new Error("health check timeout")), this.HEALTH_CHECK_TIMEOUT_MS),
         );
         await Promise.race([pingPromise, timeoutPromise]);
+        this.consecutiveHealthFailures = 0;
         // Also check relay connectivity and auto-reconnect if needed
         try {
           const result = await this.call("relay_health_check") as { reconnected?: boolean };
@@ -277,9 +311,15 @@ export class KeychatBridgeClient {
           console.warn(`[keychat] Relay health check failed: ${relayErr}`);
         }
       } catch (parseErr) {
-        console.error(`[keychat] Health check failed — killing stale process`);
-        try { this.process?.kill(); } catch { /* ignore */ }
-        // Auto-restart will trigger from the exit handler
+        this.consecutiveHealthFailures++;
+        if (this.consecutiveHealthFailures >= this.HEALTH_KILL_THRESHOLD) {
+          console.error(`[keychat] Health check failed ${this.consecutiveHealthFailures} consecutive times — killing stale process`);
+          this.consecutiveHealthFailures = 0;
+          try { this.process?.kill(); } catch { /* ignore */ }
+          // Auto-restart will trigger from the exit handler
+        } else {
+          console.warn(`[keychat] Health check failed (${this.consecutiveHealthFailures}/${this.HEALTH_KILL_THRESHOLD}) — will retry next cycle`);
+        }
       }
     }, this.HEALTH_CHECK_INTERVAL_MS);
   }

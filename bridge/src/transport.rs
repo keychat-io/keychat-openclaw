@@ -48,9 +48,9 @@ pub struct NostrTransport {
     /// Channel for sending inbound messages to the RPC layer
     inbound_tx: mpsc::UnboundedSender<InboundMessage>,
     /// Tracked receiving addresses for the ratchet subscription
-    ratchet_addrs: Mutex<HashSet<String>>,
+    ratchet_addrs: Arc<Mutex<HashSet<String>>>,
     /// Counter for generating unique subscription IDs
-    sub_counter: std::sync::atomic::AtomicU64,
+    sub_counter: Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl NostrTransport {
@@ -88,8 +88,8 @@ impl NostrTransport {
             our_pubkey,
             our_secret: our_secret.clone(),
             inbound_tx,
-            ratchet_addrs: Mutex::new(HashSet::new()),
-            sub_counter: std::sync::atomic::AtomicU64::new(0),
+            ratchet_addrs: Arc::new(Mutex::new(HashSet::new())),
+            sub_counter: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         };
 
         // Pre-populate known receiving addresses so the initial subscription
@@ -132,28 +132,51 @@ impl NostrTransport {
         self.resubscribe_ratchet_addrs_since(Some(since_secs)).await?;
         log::info!("Subscribed to DMs (main + ratchet addresses in single subscription)");
 
-        // Spawn a task to handle incoming events
+        // Spawn a task to handle incoming events with auto-restart.
+        // The event loop can exit if the relay pool emits a Shutdown notification
+        // (e.g. during relay reconnection). We wrap it in an outer loop that
+        // automatically restarts after a brief delay, so we never permanently
+        // lose inbound event processing.
         let pool = self.pool.clone();
         let our_secret = self.our_secret.clone();
         let our_pubkey = self.our_pubkey;
         let inbound_tx = self.inbound_tx.clone();
+        let ratchet_addrs = self.ratchet_addrs.clone();
+        let sub_counter = self.sub_counter.clone();
 
         tokio::spawn(async move {
-            Self::event_loop(pool, our_secret, our_pubkey, inbound_tx).await;
+            let mut restart_count: u32 = 0;
+            loop {
+                if restart_count > 0 {
+                    // Backoff: 2s, 4s, 8s, ... capped at 30s
+                    let delay = std::cmp::min(2u64.saturating_pow(restart_count), 30);
+                    log::warn!("Event loop restart #{} — waiting {}s before reconnecting...", restart_count, delay);
+                    tokio::time::sleep(std::time::Duration::from_secs(delay)).await;
+                    // Reconnect relay pool
+                    pool.connect().await;
+                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                    // Resubscribe to ratchet addresses (critical — without this we won't receive events)
+                    if let Err(e) = Self::resubscribe_addrs_static(&pool, &ratchet_addrs, &sub_counter).await {
+                        log::error!("Failed to resubscribe after event loop restart: {}", e);
+                    }
+                }
+                log::info!("Event loop started (restart_count={})", restart_count);
+                Self::event_loop_inner(&pool, &our_secret, &our_pubkey, &inbound_tx).await;
+                restart_count = restart_count.saturating_add(1);
+            }
         });
 
         Ok(())
     }
 
-    /// Event loop: receive events from relays and process them.
-    async fn event_loop(
-        pool: RelayPool,
-        our_secret: SecretKey,
-        our_pubkey: PublicKey,
-        inbound_tx: mpsc::UnboundedSender<InboundMessage>,
+    /// Inner event loop: receive events from relays and process them.
+    /// Returns when the relay pool shuts down or the notification channel errors out.
+    async fn event_loop_inner(
+        pool: &RelayPool,
+        our_secret: &SecretKey,
+        our_pubkey: &PublicKey,
+        inbound_tx: &mpsc::UnboundedSender<InboundMessage>,
     ) {
-        log::info!("Event loop started");
-
         loop {
             match pool.notifications().recv().await {
                 Ok(notification) => {
@@ -169,7 +192,7 @@ impl NostrTransport {
                                 event.kind.as_u16(), &event.id.to_string()[..16], &event.pubkey.to_string()[..16], p_tags);
 
                             // Skip our own events
-                            if event.pubkey == our_pubkey {
+                            if *our_pubkey == event.pubkey {
                                 log::info!("Skipping own event {}", &event.id.to_string()[..16]);
                                 continue;
                             }
@@ -179,31 +202,31 @@ impl NostrTransport {
                                     // NIP-04 encrypted DM
                                     Self::handle_nip04_dm(
                                         &event,
-                                        &our_secret,
-                                        &inbound_tx,
+                                        our_secret,
+                                        inbound_tx,
                                     );
                                 }
                                 Kind::GiftWrap => {
                                     // NIP-59 Gift Wrap
                                     Self::handle_gift_wrap(
                                         &event,
-                                        &our_secret,
-                                        &inbound_tx,
+                                        our_secret,
+                                        inbound_tx,
                                     );
                                 }
                                 _ => {}
                             }
                         }
                         RelayPoolNotification::Shutdown => {
-                            log::info!("Relay pool shutdown");
-                            break;
+                            log::warn!("Relay pool shutdown notification — event loop will restart");
+                            return;
                         }
                         _ => {}
                     }
                 }
                 Err(e) => {
-                    log::error!("Notification recv error: {}", e);
-                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                    log::error!("Notification recv error: {} — event loop will restart", e);
+                    return;
                 }
             }
         }
@@ -673,7 +696,26 @@ impl NostrTransport {
     /// Resubscribe to all tracked addresses in one subscription.
     /// `since_override` is used for initial subscribe (from last_seen); otherwise defaults to 1h ago.
     async fn resubscribe_ratchet_addrs_since(&self, since_override: Option<u64>) -> Result<()> {
-        let addrs = self.ratchet_addrs.lock().await;
+        Self::resubscribe_addrs_impl(&self.pool, &self.ratchet_addrs, &self.sub_counter, since_override).await
+    }
+
+    /// Static resubscribe — can be called from spawned tasks that only have Arc references.
+    async fn resubscribe_addrs_static(
+        pool: &RelayPool,
+        ratchet_addrs: &Arc<Mutex<HashSet<String>>>,
+        sub_counter: &Arc<std::sync::atomic::AtomicU64>,
+    ) -> Result<()> {
+        Self::resubscribe_addrs_impl(pool, ratchet_addrs, sub_counter, None).await
+    }
+
+    /// Core resubscription logic shared by instance and static callers.
+    async fn resubscribe_addrs_impl(
+        pool: &RelayPool,
+        ratchet_addrs: &Mutex<HashSet<String>>,
+        sub_counter: &std::sync::atomic::AtomicU64,
+        since_override: Option<u64>,
+    ) -> Result<()> {
+        let addrs = ratchet_addrs.lock().await;
         if addrs.is_empty() {
             return Ok(());
         }
@@ -706,16 +748,16 @@ impl NostrTransport {
         // Use a unique subscription ID each time to force relays to re-scan
         // historical events. Some relays skip historical re-delivery when the
         // subscription ID is reused with a different filter.
-        let sub_counter = self.sub_counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let sub_id = SubscriptionId::new(format!("keychat-{}", sub_counter));
+        let counter_val = sub_counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let sub_id = SubscriptionId::new(format!("keychat-{}", counter_val));
         let opts = SubscribeOptions::default();
         // Unsubscribe old subscription first (if any)
-        if sub_counter > 0 {
-            let old_id = SubscriptionId::new(format!("keychat-{}", sub_counter - 1));
-            let _ = self.pool.unsubscribe(old_id).await;
+        if counter_val > 0 {
+            let old_id = SubscriptionId::new(format!("keychat-{}", counter_val - 1));
+            let _ = pool.unsubscribe(old_id).await;
         }
-        self.pool.subscribe_with_id(sub_id, filter, opts).await?;
-        log::info!("Subscription updated: {} address(es) (sub #{})", addrs.len(), sub_counter);
+        pool.subscribe_with_id(sub_id, filter, opts).await?;
+        log::info!("Subscription updated: {} address(es) (sub #{})", addrs.len(), counter_val);
         Ok(())
     }
 

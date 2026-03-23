@@ -10,13 +10,11 @@
  * with the Keychat app.
  */
 
-import {
-  buildChannelConfigSchema,
-  createReplyPrefixOptions,
-  DEFAULT_ACCOUNT_ID,
-  formatPairingApproveHint,
-  type ChannelPlugin,
-} from "openclaw/plugin-sdk";
+import { buildChannelConfigSchema } from "openclaw/plugin-sdk/channel-config-schema";
+import { createReplyPrefixOptions } from "openclaw/plugin-sdk/channel-runtime";
+import { DEFAULT_ACCOUNT_ID } from "openclaw/plugin-sdk/account-id";
+import { formatPairingApproveHint } from "openclaw/plugin-sdk/core";
+import type { ChannelPlugin } from "openclaw/plugin-sdk";
 
 /**
  * Strip "Reasoning:\n_..._" prefix that OpenClaw core prepends when
@@ -2926,7 +2924,13 @@ async function handleEncryptedDM(
     }
 
     ctx.log?.info(`[${accountId}] Routing as 1:1 DM (no group context detected)`);
-    await dispatchToAgent(bridge, accountId, peerNostrPubkey, senderLabel, displayText, msg.event_id, runtime, ctx, mediaPath);
+    try {
+      await dispatchToAgent(bridge, accountId, peerNostrPubkey, senderLabel, displayText, msg.event_id, runtime, ctx, mediaPath);
+      ctx.log?.info(`[${accountId}] dispatchToAgent completed`);
+    } catch (dispatchErr) {
+      ctx.log?.error(`[${accountId}] dispatchToAgent FAILED: ${dispatchErr}`);
+      console.error(`[keychat] dispatchToAgent error:`, dispatchErr);
+    }
   }
 }
 

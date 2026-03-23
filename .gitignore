@@ -1,6 +1,7 @@
 bridge/target/
 bridge/keychat-openclaw-*
 keychat-bridge
+keychat-bridge-*
 node_modules/
 package-lock.json
 *.db

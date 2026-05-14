@@ -130,7 +130,7 @@ function appendKeychatAllowFromStore(pubkey: string, accountId?: string): void {
 /** Check if this account has any allowed peers (config + store). */
 /** Get the owner pubkey — first entry in config allowFrom list. */
 function getOwnerPubkey(accountId: string, runtime: ReturnType<typeof getKeychatRuntime>): string | null {
-  const cfg = runtime.config.loadConfig();
+  const cfg = runtime.config.current();
   const account = resolveKeychatAccount({ cfg, accountId });
   // Explicit owner field takes priority
   if (account.config.owner) return normalizePubkey(String(account.config.owner));
@@ -143,7 +143,7 @@ function getOwnerPubkey(accountId: string, runtime: ReturnType<typeof getKeychat
 }
 
 function hasAnyAllowedPeers(accountId: string, runtime: ReturnType<typeof getKeychatRuntime>): boolean {
-  const cfg = runtime.config.loadConfig();
+  const cfg = runtime.config.current();
   const account = resolveKeychatAccount({ cfg, accountId });
   const configEntries = (account.config.allowFrom ?? []).filter((e) => String(e).trim() && String(e).trim() !== "*");
   const storeEntries = readKeychatAllowFromStore(accountId);
@@ -160,7 +160,7 @@ function resolveDmAccess(
   senderNostrPubkey: string,
   runtime: ReturnType<typeof getKeychatRuntime>,
 ): { decision: "allow" | "block" | "pairing" } {
-  const cfg = runtime.config.loadConfig();
+  const cfg = runtime.config.current();
   const account = resolveKeychatAccount({ cfg, accountId });
   const dmPolicy = account.config.dmPolicy ?? "pairing";
 
@@ -536,7 +536,8 @@ async function flushPendingOutbound(): Promise<void> {
 }
 
 // Periodic flush every 30s
-setInterval(() => { flushPendingOutbound().catch(() => {}); }, 30_000);
+const pendingOutboundFlushTimer = setInterval(() => { flushPendingOutbound().catch(() => {}); }, 30_000);
+pendingOutboundFlushTimer.unref?.();
 
 /** Queue a message for later delivery when bridge is unavailable. */
 function queueOutbound(to: string, text: string, accountId: string): void {
@@ -1344,16 +1345,17 @@ export const keychatPlugin: ChannelPlugin<ResolvedKeychatAccount> = {
         await storeMnemonic(account.accountId, account.mnemonic);
         ctx.log?.info(`[${account.accountId}] Legacy mnemonic migrated to system keychain`);
         await configWriteLock(async () => {
-          const cfg = runtime.config.loadConfig();
-          const channels = (cfg.channels ?? {}) as Record<string, unknown>;
-          const keychatCfg = (channels.keychat ?? {}) as Record<string, unknown>;
-          delete (keychatCfg as any).mnemonic;
-          const accounts = ((keychatCfg.accounts ?? {}) as Record<string, Record<string, unknown>>);
-          const acct = accounts[account.accountId];
-          if (acct) delete acct.mnemonic;
-          await runtime.config.writeConfigFile({
-            ...cfg,
-            channels: { ...channels, keychat: keychatCfg },
+          await runtime.config.mutateConfigFile({
+            afterWrite: { mode: "auto" },
+            mutate(draft: any) {
+              const channels = (draft.channels ?? {}) as Record<string, unknown>;
+              const keychatCfg = (channels.keychat ?? {}) as Record<string, unknown>;
+              delete (keychatCfg as any).mnemonic;
+              const accounts = ((keychatCfg.accounts ?? {}) as Record<string, Record<string, unknown>>);
+              const acct = accounts[account.accountId];
+              if (acct) delete acct.mnemonic;
+              draft.channels = { ...channels, keychat: keychatCfg };
+            },
           });
         });
         ctx.log?.info(`[${account.accountId}] Mnemonic removed from config`);
@@ -1439,7 +1441,7 @@ export const keychatPlugin: ChannelPlugin<ResolvedKeychatAccount> = {
         await QRCode.toFile(qrPath, contactUrl, { width: 256 });
       } catch { /* skip */ }
 
-      const cfg = runtime.config.loadConfig();
+      const cfg = runtime.config.current();
       const displayName = resolveDisplayName(cfg, account.accountId, account.name);
 
       ctx.log?.info(`\n` +

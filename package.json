@@ -9,6 +9,7 @@
   },
   "type": "module",
   "scripts": {
+    "build": "tsc -p tsconfig.json",
     "postinstall": "node scripts/postinstall.mjs"
   },
   "dependencies": {
@@ -16,10 +17,19 @@
     "qrcode": "^1.5.4",
     "zod": "^4.3.6"
   },
+  "peerDependencies": {
+    "openclaw": ">=2026.5.7"
+  },
   "openclaw": {
     "extensions": [
       "./index.ts"
     ],
+    "runtimeExtensions": [
+      "./dist/index.js"
+    ],
+    "install": {
+      "minHostVersion": ">=2026.5.7"
+    },
     "channel": {
       "id": "keychat",
       "label": "Keychat",
@@ -29,5 +39,9 @@
       "blurb": "Sovereign identity + E2E encrypted chat via Signal Protocol over Nostr relays.",
       "order": 56
     }
+  },
+  "devDependencies": {
+    "@types/node": "^25.7.0",
+    "typescript": "^6.0.3"
   }
 }

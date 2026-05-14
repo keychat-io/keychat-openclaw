@@ -32,6 +32,9 @@ const KeychatAccountSchema = z.object({
   /** Allowed sender pubkeys (npub or hex format) */
   allowFrom: z.array(allowFromEntry).optional(),
 
+  /** Owner pubkey used for approving pending contacts */
+  owner: z.string().optional(),
+
   /** Lightning address for receiving payments (e.g. "user@walletofsatoshi.com") */
   lightningAddress: z.string().optional(),
 

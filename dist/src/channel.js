@@ -1,0 +1,3122 @@
+/**
+ * Keychat channel plugin for OpenClaw.
+ *
+ * The agent is a full Keychat citizen:
+ * - Self-generated Public Key ID (Nostr keypair)
+ * - Signal Protocol E2E encryption
+ * - Communicates via Nostr relays
+ *
+ * Uses Keychat (sidecar) for protocol compatibility
+ * with the Keychat app.
+ */
+import { buildChannelConfigSchema } from "openclaw/plugin-sdk/channel-config-schema";
+import { createReplyPrefixOptions } from "openclaw/plugin-sdk/channel-runtime";
+import { DEFAULT_ACCOUNT_ID } from "openclaw/plugin-sdk/account-id";
+import { formatPairingApproveHint } from "openclaw/plugin-sdk/core";
+/**
+ * Strip "Reasoning:\n_..._" prefix that OpenClaw core prepends when
+ * reasoning display is enabled.  Keychat has no collapsible UI for it,
+ * so we silently drop it to keep messages clean.
+ */
+function stripReasoningPrefix(text) {
+    // Strip reasoning in multiple formats:
+    // 1. "Reasoning:\n_line1_\n_line2_\n\nActual answer..."
+    // 2. Leading italic blocks: "_thinking text_\n_more thinking_\n\nActual answer..."
+    // 3. "**Heading**\n_thinking_\n\nActual answer..."
+    let result = text;
+    // Format 1: Explicit "Reasoning:" prefix
+    result = result.replace(/^Reasoning:\n(?:_[^\n]*_\n?)+\n*/s, "");
+    // Format 2: Leading italic lines (markdown _text_) at the start
+    // Keep stripping italic lines until we hit a non-italic line
+    result = result.replace(/^(?:_[^\n]*_\n*)+\n*/s, "");
+    return result.trim();
+}
+import { KeychatConfigSchema } from "./config-schema.js";
+import { getKeychatRuntime } from "./runtime.js";
+import { listKeychatAccountIds, resolveDefaultKeychatAccountId, resolveKeychatAccount, } from "./types.js";
+import { KeychatBridgeClient, } from "./bridge-client.js";
+import { storeMnemonic, retrieveMnemonic, checkKeychainAvailable, autoFixKeychain } from "./keychain.js";
+import { parseMediaUrl, downloadAndDecrypt, encryptAndUpload } from "./media.js";
+const loadStt = () => import("./stt.js");
+import { join } from "node:path";
+import { ensureBinary } from "./ensure-binary.js";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { writeFile as writeFileAsync } from "node:fs/promises";
+import { homedir, tmpdir } from "node:os";
+import { signalDbPath, qrCodePath, WORKSPACE_KEYCHAT_DIR } from "./paths.js";
+// ═══════════════════════════════════════════════════════════════════════════
+// DM Policy enforcement — gate inbound messages before dispatch to agent
+// Uses OpenClaw's resolveDmGroupAccessWithLists for consistent behavior
+// with built-in channels (Signal, Telegram, Discord, etc.)
+// ═══════════════════════════════════════════════════════════════════════════
+/** Resolve the credentials file path for a channel, matching the framework naming convention.
+ *  Without accountId: `keychat-<suffix>.json`
+ *  With accountId:    `keychat-<accountId>-<suffix>.json`
+ */
+function resolveKeychatCredPath(suffix, accountId) {
+    const base = "keychat";
+    const safeAccount = accountId ? String(accountId).trim().toLowerCase().replace(/[\\/:*?"<>|]/g, "_").replace(/\.\./g, "_") : "";
+    const filename = safeAccount ? `${base}-${safeAccount}-${suffix}.json` : `${base}-${suffix}.json`;
+    return join(homedir(), ".openclaw", "credentials", filename);
+}
+/** Read the allow-from store for a channel (credentials/keychat[-<accountId>]-allowFrom.json). */
+function readKeychatAllowFromStore(accountId) {
+    try {
+        const accountPath = accountId ? resolveKeychatCredPath("allowFrom", accountId) : null;
+        const channelPath = resolveKeychatCredPath("allowFrom");
+        if (accountPath && existsSync(accountPath)) {
+            const store = JSON.parse(readFileSync(accountPath, "utf-8"));
+            return (store.allowFrom ?? []).map((e) => String(e).trim()).filter(Boolean);
+        }
+        // Account-specific file doesn't exist — check channel-level fallback
+        if (existsSync(channelPath)) {
+            const raw = readFileSync(channelPath, "utf-8");
+            const store = JSON.parse(raw);
+            // Migrate: copy channel-level file to account-specific path so framework
+            // and plugin stay in sync after the user upgrades to multi-account config
+            if (accountPath) {
+                try {
+                    writeFileSync(accountPath, raw, "utf-8");
+                }
+                catch { /* best effort */ }
+            }
+            return (store.allowFrom ?? []).map((e) => String(e).trim()).filter(Boolean);
+        }
+        return [];
+    }
+    catch {
+        return [];
+    }
+}
+/** Append a pubkey to the allow-from store file. */
+function appendKeychatAllowFromStore(pubkey, accountId) {
+    const storePath = accountId
+        ? resolveKeychatCredPath("allowFrom", accountId)
+        : resolveKeychatCredPath("allowFrom");
+    try {
+        let store = { version: 1, allowFrom: [] };
+        if (existsSync(storePath)) {
+            store = JSON.parse(readFileSync(storePath, "utf-8"));
+        }
+        const normalized = normalizePubkey(pubkey);
+        if (!store.allowFrom.includes(normalized)) {
+            store.allowFrom.push(normalized);
+            writeFileSync(storePath, JSON.stringify(store, null, 2) + "\n", "utf-8");
+        }
+    }
+    catch { /* best effort */ }
+}
+/** Check if this account has any allowed peers (config + store). */
+/** Get the owner pubkey — first entry in config allowFrom list. */
+function getOwnerPubkey(accountId, runtime) {
+    const cfg = runtime.config.current();
+    const account = resolveKeychatAccount({ cfg, accountId });
+    // Explicit owner field takes priority
+    if (account.config.owner)
+        return normalizePubkey(String(account.config.owner));
+    // Fallback: first entry in allowFrom
+    const configAllowFrom = (account.config.allowFrom ?? []).map((e) => String(e));
+    if (configAllowFrom.length > 0)
+        return normalizePubkey(configAllowFrom[0]);
+    const storeEntries = readKeychatAllowFromStore(accountId);
+    if (storeEntries.length > 0)
+        return normalizePubkey(storeEntries[0]);
+    return null;
+}
+function hasAnyAllowedPeers(accountId, runtime) {
+    const cfg = runtime.config.current();
+    const account = resolveKeychatAccount({ cfg, accountId });
+    const configEntries = (account.config.allowFrom ?? []).filter((e) => String(e).trim() && String(e).trim() !== "*");
+    const storeEntries = readKeychatAllowFromStore(accountId);
+    return configEntries.length > 0 || storeEntries.length > 0;
+}
+/**
+ * Resolve DM access decision for an inbound message.
+ * Self-contained — does NOT depend on SDK functions (which fail in ESM plugin context).
+ * Returns "allow" | "block" | "pairing".
+ */
+function resolveDmAccess(accountId, senderNostrPubkey, runtime) {
+    const cfg = runtime.config.current();
+    const account = resolveKeychatAccount({ cfg, accountId });
+    const dmPolicy = account.config.dmPolicy ?? "pairing";
+    // "open" allows everyone
+    if (dmPolicy === "open")
+        return { decision: "allow" };
+    // "disabled" blocks everyone
+    if (dmPolicy === "disabled")
+        return { decision: "block" };
+    const senderNormalized = normalizePubkey(senderNostrPubkey);
+    // Collect all allowed entries: config + store (pairing approvals)
+    const configEntries = (account.config.allowFrom ?? []).map((e) => normalizePubkey(String(e)));
+    const storeEntries = readKeychatAllowFromStore(accountId).map((e) => normalizePubkey(e));
+    const allAllowed = [...configEntries, ...storeEntries];
+    // Check wildcard
+    if (allAllowed.includes("*"))
+        return { decision: "allow" };
+    // Check if sender is in any allowlist
+    const isAllowed = allAllowed.includes(senderNormalized);
+    if (dmPolicy === "allowlist") {
+        return isAllowed ? { decision: "allow" } : { decision: "block" };
+    }
+    if (dmPolicy === "pairing") {
+        return isAllowed ? { decision: "allow" } : { decision: "pairing" };
+    }
+    return { decision: "block" };
+}
+/** Generate a random 6-char alphanumeric pairing code. */
+function generatePairingCode() {
+    const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"; // no I/O/0/1 to avoid confusion
+    let code = "";
+    const { randomBytes } = require("node:crypto");
+    const bytes = randomBytes(6);
+    for (const b of bytes)
+        code += chars[b % chars.length];
+    return code;
+}
+/** Upsert a pairing request for a Keychat sender. Returns { code, created }. */
+function upsertKeychatPairingRequest(senderId, meta, accountId) {
+    // Use channel-level pairing path (no accountId in filename) to match OpenClaw CLI's resolvePairingPath.
+    // The accountId is stored inside each request object for multi-account disambiguation.
+    const pairingPath = resolveKeychatCredPath("pairing");
+    try {
+        let data = { version: 1, requests: [] };
+        if (existsSync(pairingPath)) {
+            data = JSON.parse(readFileSync(pairingPath, "utf-8"));
+        }
+        const now = new Date().toISOString();
+        const normalizedId = normalizePubkey(senderId);
+        const existing = data.requests.find((r) => normalizePubkey(r.id) === normalizedId);
+        if (existing) {
+            existing.lastSeenAt = now;
+            if (accountId)
+                existing.accountId = accountId;
+            if (meta)
+                existing.meta = { ...existing.meta, ...meta };
+            writeFileSync(pairingPath, JSON.stringify(data, null, 2) + "\n", "utf-8");
+            return { code: existing.code, created: false };
+        }
+        // Generate unique code
+        const existingCodes = new Set(data.requests.map((r) => r.code));
+        let code = generatePairingCode();
+        while (existingCodes.has(code))
+            code = generatePairingCode();
+        data.requests.push({ id: normalizedId, code, createdAt: now, lastSeenAt: now, accountId, meta });
+        // Cap at 50 pending requests
+        if (data.requests.length > 50) {
+            data.requests = data.requests.slice(-50);
+        }
+        writeFileSync(pairingPath, JSON.stringify(data, null, 2) + "\n", "utf-8");
+        return { code, created: true };
+    }
+    catch {
+        return { code: "", created: false };
+    }
+}
+function listKeychatPairingRequests(accountId) {
+    const pairingPath = resolveKeychatCredPath("pairing");
+    try {
+        if (!existsSync(pairingPath))
+            return [];
+        const data = JSON.parse(readFileSync(pairingPath, "utf-8"));
+        return (data.requests || [])
+            .filter((r) => !accountId || !r.accountId || r.accountId === accountId)
+            .map((r) => ({ pubkey: normalizePubkey(r.id), name: r.meta?.name, code: r.code }));
+    }
+    catch {
+        return [];
+    }
+}
+function removePairingRequest(pubkey, accountId) {
+    const pairingPath = resolveKeychatCredPath("pairing");
+    try {
+        if (!existsSync(pairingPath))
+            return;
+        const data = JSON.parse(readFileSync(pairingPath, "utf-8"));
+        const normalizedPk = normalizePubkey(pubkey);
+        data.requests = (data.requests || []).filter((r) => normalizePubkey(r.id) !== normalizedPk);
+        writeFileSync(pairingPath, JSON.stringify(data, null, 2) + "\n", "utf-8");
+    }
+    catch { /* ignore */ }
+}
+/** Look up the accountId for a pairing request by peer id. */
+function getAccountIdForPairingPeer(peerId) {
+    const normalizedId = normalizePubkey(peerId);
+    // Check all possible pairing files
+    for (const [aid] of activeBridges) {
+        const pairingPath = resolveKeychatCredPath("pairing", aid);
+        try {
+            if (!existsSync(pairingPath))
+                continue;
+            const data = JSON.parse(readFileSync(pairingPath, "utf-8"));
+            const req = data.requests?.find((r) => normalizePubkey(r.id) === normalizedId);
+            if (req?.accountId)
+                return req.accountId;
+        }
+        catch { /* */ }
+    }
+    // Also check default (no accountId) pairing file
+    const defaultPath = resolveKeychatCredPath("pairing");
+    try {
+        if (existsSync(defaultPath)) {
+            const data = JSON.parse(readFileSync(defaultPath, "utf-8"));
+            const req = data.requests?.find((r) => normalizePubkey(r.id) === normalizedId);
+            if (req?.accountId)
+                return req.accountId;
+        }
+    }
+    catch { /* */ }
+    return undefined;
+}
+/** Build the pairing reply message text. */
+function buildKeychatPairingReply(code, senderId) {
+    return [
+        "OpenClaw: access not configured.",
+        "",
+        `keychatPubkey: ${senderId}`,
+        "",
+        `Pairing code: ${code}`,
+        "",
+        "Ask the bot owner to approve with:",
+        `  openclaw pairing approve keychat ${code}`,
+    ].join("\n");
+}
+const pendingOutbound = [];
+const MAX_PENDING_QUEUE = 100;
+const MAX_MESSAGE_RETRIES = 5;
+// ═══════════════════════════════════════════════════════════════════════════
+// Friend request / hello state machine
+// ═══════════════════════════════════════════════════════════════════════════
+var FriendRequestState;
+(function (FriendRequestState) {
+    FriendRequestState["IDLE"] = "IDLE";
+    FriendRequestState["WAIT_ACCEPT"] = "WAIT_ACCEPT";
+    FriendRequestState["SESSION_ESTABLISHED"] = "SESSION_ESTABLISHED";
+    FriendRequestState["NORMAL_CHAT"] = "NORMAL_CHAT";
+})(FriendRequestState || (FriendRequestState = {}));
+class FriendRequestManager {
+    flowsByAccount = new Map();
+    getFlows(accountId) {
+        let flows = this.flowsByAccount.get(accountId);
+        if (!flows) {
+            flows = new Map();
+            this.flowsByAccount.set(accountId, flows);
+        }
+        return flows;
+    }
+    getOrCreateFlow(accountId, peerPubkey) {
+        const flows = this.getFlows(accountId);
+        let flow = flows.get(peerPubkey);
+        if (!flow) {
+            flow = {
+                state: FriendRequestState.IDLE,
+                initiatedByUs: false,
+            };
+            flows.set(peerPubkey, flow);
+        }
+        return flow;
+    }
+    getState(accountId, peerPubkey) {
+        const flow = this.getFlows(accountId).get(peerPubkey);
+        return flow?.state ?? FriendRequestState.IDLE;
+    }
+    isWaitingAccept(accountId, peerPubkey) {
+        return this.getState(accountId, peerPubkey) === FriendRequestState.WAIT_ACCEPT;
+    }
+    isInitiatorSidePending(accountId, peerPubkey) {
+        const flow = this.getFlows(accountId).get(peerPubkey);
+        if (!flow)
+            return false;
+        return flow.initiatedByUs;
+    }
+    hasSession(accountId, peerPubkey) {
+        const state = this.getState(accountId, peerPubkey);
+        return state === FriendRequestState.SESSION_ESTABLISHED || state === FriendRequestState.NORMAL_CHAT;
+    }
+    setSessionEstablished(accountId, peerPubkey) {
+        const flow = this.getOrCreateFlow(accountId, peerPubkey);
+        // Protocol Step 4: accept-first decrypted and Signal session established.
+        flow.state = FriendRequestState.SESSION_ESTABLISHED;
+    }
+    setNormalChat(accountId, peerPubkey) {
+        const flow = this.getOrCreateFlow(accountId, peerPubkey);
+        flow.state = FriendRequestState.NORMAL_CHAT;
+    }
+    restoreWaitAccept(accountId, peerPubkey) {
+        const flow = this.getOrCreateFlow(accountId, peerPubkey);
+        flow.state = FriendRequestState.WAIT_ACCEPT;
+        flow.initiatedByUs = true;
+    }
+    resetPeer(accountId, peerPubkey) {
+        this.getFlows(accountId).delete(peerPubkey);
+    }
+    resetAccount(accountId) {
+        this.flowsByAccount.delete(accountId);
+    }
+    async ensureOutgoingHelloAndHandshakeSubscriptions(bridge, accountId, peerPubkey, senderName) {
+        const flow = this.getOrCreateFlow(accountId, peerPubkey);
+        if (flow.state === FriendRequestState.WAIT_ACCEPT)
+            return;
+        if (flow.state === FriendRequestState.SESSION_ESTABLISHED || flow.state === FriendRequestState.NORMAL_CHAT)
+            return;
+        // Protocol Step 1: Send friend request (kind:1059 Gift Wrap).
+        const helloResult = await bridge.sendHello(peerPubkey, senderName);
+        flow.state = FriendRequestState.WAIT_ACCEPT;
+        flow.initiatedByUs = true;
+        // Auto-allow this peer since WE initiated the friend request.
+        appendKeychatAllowFromStore(peerPubkey, accountId);
+        // Protocol Step 3: accept-first is sent to A_onetimekey.
+        // curve25519 identity pubkey is NOT a receiving address; subscribing to it
+        // causes routing conflicts when multiple hellos are in flight.
+        const handshakeAddresses = new Set();
+        if (helloResult.peer_first_inbox) {
+            handshakeAddresses.add(helloResult.peer_first_inbox);
+            getAddressToPeer(accountId).set(helloResult.peer_first_inbox, peerPubkey);
+            try {
+                await bridge.saveReceivingAddress(helloResult.peer_first_inbox, peerPubkey);
+            }
+            catch { /* best effort */ }
+        }
+        if (handshakeAddresses.size > 0) {
+            await bridge.addSubscription(Array.from(handshakeAddresses));
+        }
+    }
+    async queueUntilSession(bridge, accountId, peerPubkey, text) {
+        const { id } = await bridge.savePendingHelloMessage(peerPubkey, text);
+        this.getOrCreateFlow(accountId, peerPubkey).initiatedByUs = true;
+        return {
+            channel: "keychat",
+            to: peerPubkey,
+            messageId: `pending-hello-${id}`,
+        };
+    }
+    async flushQueuedAfterSession(bridge, accountId, peerPubkey) {
+        const flow = this.getOrCreateFlow(accountId, peerPubkey);
+        const { messages } = await bridge.getPendingHelloMessages(peerPubkey);
+        if (messages.length === 0)
+            return;
+        let promotedToNormalChat = false;
+        for (const queued of messages) {
+            try {
+                const result = await bridge.sendMessage(peerPubkey, queued.text);
+                await handleReceivingAddressRotation(bridge, accountId, result, peerPubkey);
+                await bridge.deletePendingHelloMessageById(queued.id);
+                if (!promotedToNormalChat) {
+                    // Protocol Step 5: first post-handshake send triggers ratchet switch.
+                    // Protocol Step 6: after that first message is sent, treat this peer as NORMAL_CHAT.
+                    flow.state = FriendRequestState.NORMAL_CHAT;
+                    promotedToNormalChat = true;
+                }
+            }
+            catch (err) {
+                throw err instanceof Error ? err : new Error(String(err));
+            }
+        }
+        flow.initiatedByUs = false;
+    }
+}
+const friendRequestManager = new FriendRequestManager();
+/** Flush pending outbound messages — called after bridge restart and periodically. */
+async function flushPendingOutbound() {
+    if (pendingOutbound.length === 0)
+        return;
+    // Check if any bridge is connected
+    const bridges = [...activeBridges.entries()];
+    if (bridges.length === 0)
+        return;
+    // Try to flush each message
+    const toRetry = [];
+    while (pendingOutbound.length > 0) {
+        const msg = pendingOutbound.shift();
+        const bridge = activeBridges.get(msg.accountId);
+        if (!bridge) {
+            toRetry.push(msg);
+            continue;
+        }
+        const connected = await bridge.isConnected();
+        if (!connected) {
+            toRetry.push(msg);
+            continue;
+        }
+        try {
+            const retryResult = await bridge.sendMessage(msg.to, msg.text);
+            await handleReceivingAddressRotation(bridge, msg.accountId ?? DEFAULT_ACCOUNT_ID, retryResult, msg.to);
+        }
+        catch {
+            msg.retries++;
+            if (msg.retries >= MAX_MESSAGE_RETRIES) {
+                console.warn(`[keychat] Dropping message to ${msg.to} after ${MAX_MESSAGE_RETRIES} retries`);
+            }
+            else {
+                toRetry.push(msg);
+            }
+        }
+    }
+    // Put failed messages back
+    for (const msg of toRetry) {
+        if (pendingOutbound.length < MAX_PENDING_QUEUE) {
+            pendingOutbound.push(msg);
+        }
+        else {
+            console.warn(`[keychat] Pending outbound queue full, dropping message to ${msg.to}`);
+        }
+    }
+}
+// Periodic flush every 30s
+const pendingOutboundFlushTimer = setInterval(() => { flushPendingOutbound().catch(() => { }); }, 30_000);
+pendingOutboundFlushTimer.unref?.();
+/** Queue a message for later delivery when bridge is unavailable. */
+function queueOutbound(to, text, accountId) {
+    if (pendingOutbound.length >= MAX_PENDING_QUEUE) {
+        console.warn(`[keychat] Pending outbound queue full, dropping message to ${to}`);
+        return;
+    }
+    pendingOutbound.push({ to, text, retries: 0, accountId });
+}
+// ═══════════════════════════════════════════════════════════════════════════
+// Task 8: Session recovery tracking
+// ═══════════════════════════════════════════════════════════════════════════
+// Removed: sessionRecoveryAttempted — we no longer auto-send corruption notices
+/** Retry a send operation with exponential backoff. */
+async function retrySend(fn, maxRetries = 3, baseDelayMs = 500) {
+    for (let attempt = 0; attempt <= maxRetries; attempt++) {
+        try {
+            return await fn();
+        }
+        catch (err) {
+            if (attempt === maxRetries)
+                throw err;
+            const delay = baseDelayMs * Math.pow(2, attempt);
+            await new Promise(r => setTimeout(r, delay));
+        }
+    }
+    throw new Error("unreachable");
+}
+// Active bridge clients per account
+const activeBridges = new Map();
+// Cached account info per account
+const accountInfoCache = new Map();
+// Bridge readiness promises — resolved when startAccount completes
+const bridgeReadyResolvers = new Map();
+const bridgeReadyPromises = new Map();
+/** Wait for a bridge to become ready, with timeout. */
+async function waitForBridge(accountId, timeoutMs = 30000) {
+    const existing = activeBridges.get(accountId);
+    if (existing)
+        return existing;
+    // Wait for the bridge to start
+    let readyPromise = bridgeReadyPromises.get(accountId);
+    if (!readyPromise) {
+        readyPromise = new Promise((resolve) => {
+            bridgeReadyResolvers.set(accountId, resolve);
+        });
+        bridgeReadyPromises.set(accountId, readyPromise);
+    }
+    const timeout = new Promise((_, reject) => setTimeout(() => reject(new Error(`Keychat bridge not ready after ${timeoutMs}ms`)), timeoutMs));
+    await Promise.race([readyPromise, timeout]);
+    const bridge = activeBridges.get(accountId);
+    if (!bridge)
+        throw new Error(`Keychat bridge not running for account ${accountId}`);
+    return bridge;
+}
+// Per-account maps (keyed by accountId)
+const peerSessionsByAccount = new Map();
+const addressToPeerByAccount = new Map();
+const seenEventIdsByAccount = new Map();
+// Helpers to get per-account maps (auto-create on first access)
+function getPeerSessions(accountId) {
+    let m = peerSessionsByAccount.get(accountId);
+    if (!m) {
+        m = new Map();
+        peerSessionsByAccount.set(accountId, m);
+    }
+    return m;
+}
+function getAddressToPeer(accountId) {
+    let m = addressToPeerByAccount.get(accountId);
+    if (!m) {
+        m = new Map();
+        addressToPeerByAccount.set(accountId, m);
+    }
+    return m;
+}
+function getSeenEventIds(accountId) {
+    let s = seenEventIdsByAccount.get(accountId);
+    if (!s) {
+        s = new Set();
+        seenEventIdsByAccount.set(accountId, s);
+    }
+    return s;
+}
+/**
+ * Resolve display name for a keychat account.
+ * Priority: channel config name > agent identity name > fallback.
+ */
+function resolveDisplayName(cfg, accountId, channelName, fallback = "Keychat Agent") {
+    if (channelName)
+        return channelName;
+    // Look up agent identity name via bindings
+    const bindings = (cfg.bindings ?? []);
+    const binding = bindings.find(b => b.match?.channel === "keychat" && b.match?.accountId === accountId);
+    const agentId = binding?.agentId ?? (accountId === DEFAULT_ACCOUNT_ID ? "main" : accountId);
+    const agents = (cfg.agents?.list ?? []);
+    const agent = agents.find(a => a.id === agentId);
+    return agent?.identity?.name || agent?.name || fallback;
+}
+// Mutex for friend request processing to prevent concurrent hello corruption
+let helloProcessingLock = Promise.resolve();
+const SEEN_EVENT_MAX = 1000;
+/** Mark an event as processed (in-memory + DB). Call BEFORE decrypt to prevent
+ *  ratchet corruption on retry — Signal decrypt consumes message keys. */
+function markProcessed(bridge, accountId, eventId, createdAt) {
+    if (!eventId)
+        return;
+    const seen = getSeenEventIds(accountId);
+    seen.add(eventId);
+    if (seen.size > SEEN_EVENT_MAX) {
+        const first = seen.values().next().value;
+        if (first)
+            seen.delete(first);
+    }
+    bridge.markEventProcessed(eventId, createdAt).catch(() => { });
+}
+// Simple async mutex for serializing config file writes (avoids read-modify-write races)
+let _configLockPromise = Promise.resolve();
+async function configWriteLock(fn) {
+    const prev = _configLockPromise;
+    let releaseFn;
+    _configLockPromise = new Promise(r => { releaseFn = r; });
+    await prev;
+    try {
+        return await fn();
+    }
+    finally {
+        releaseFn();
+    }
+}
+// per-account: peerNostrPubkey → subscribed receiving addresses (oldest..newest)
+const peerSubscribedAddressesByAccount = new Map();
+// ── Summary notification (debounced, fires once after all accounts start) ──
+let _summaryTimer = null;
+const SUMMARY_DEBOUNCE_MS = 3000;
+function scheduleSummaryNotification(ctx) {
+    if (_summaryTimer)
+        clearTimeout(_summaryTimer);
+    _summaryTimer = setTimeout(async () => {
+        _summaryTimer = null;
+        try {
+            const { KEYCHAT_DIR } = await import("./paths.js");
+            const { writeFileSync } = await import("node:fs");
+            // Check if ANY account still needs notification
+            const contacts = getAllAgentContacts();
+            const needsNotify = [];
+            for (const c of contacts) {
+                const marker = join(KEYCHAT_DIR, `.notified-${c.accountId}`);
+                if (!existsSync(marker))
+                    needsNotify.push(c);
+            }
+            if (needsNotify.length === 0)
+                return; // all already notified
+            // Build summary with all agents (not just new ones — include all for context)
+            const cfg = getKeychatRuntime().config.loadConfig();
+            let lines = [];
+            if (contacts.length === 1) {
+                const c = contacts[0];
+                const name = resolveDisplayName(cfg, c.accountId);
+                lines.push(`[Keychat Plugin] Agent "${name}" is online and ready.`, `Keychat ID: ${c.npub}`, `Contact link: ${c.contactUrl}`, `Use the keychat_identity tool to get the QR code image.`, `Send the contact info to the user on their active channel so they can add this agent in Keychat app.`);
+            }
+            else {
+                lines.push(`[Keychat Plugin] ${contacts.length} agents are online and ready:`);
+                lines.push(``);
+                for (const c of contacts) {
+                    const name = resolveDisplayName(cfg, c.accountId);
+                    lines.push(`• ${name} (account: ${c.accountId})`);
+                    lines.push(`  Keychat ID: ${c.npub}`);
+                    lines.push(`  Link: ${c.contactUrl}`);
+                    lines.push(``);
+                }
+                lines.push(`Use the keychat_identity tool to get QR code images for each agent.`);
+                lines.push(`Send all agent contact info to the user on their active channel so they can add them in Keychat app.`);
+            }
+            const { sendSystemEvent, sendToActiveChannels, sendToWebchat } = await import("./notify.js");
+            await sendSystemEvent(lines.join("\n"));
+            // Also push directly to webchat UI (no agent run needed)
+            const webchatLines = [];
+            if (contacts.length === 1) {
+                const c = needsNotify[0] ?? contacts[0];
+                const name = resolveDisplayName(cfg, c.accountId);
+                webchatLines.push(`🔑 Keychat agent **"${name}"** is ready!`, ``, `**npub:** \`${c.npub}\``, `**Contact link:** ${c.contactUrl}`, ``, `Share the contact link or QR code with users so they can add this agent in the Keychat app.`);
+            }
+            else {
+                webchatLines.push(`🔑 **${contacts.length} Keychat agents** are ready:`);
+                for (const c of needsNotify) {
+                    const name = resolveDisplayName(cfg, c.accountId);
+                    webchatLines.push(``, `**${name}:** \`${c.npub}\``, `Link: ${c.contactUrl}`);
+                }
+            }
+            sendToWebchat({ message: webchatLines.join("\n") }).catch((e) => {
+                ctx.log?.warn?.(`sendToWebchat failed: ${e?.message ?? e}`);
+            });
+            // Also proactively push QR + link to all recently active channels (Discord, Telegram, etc.)
+            // so the user gets the message even if the system event fires without a clear channel context.
+            if (contacts.length > 0) {
+                // Build a concise direct message for channel push
+                const directLines = [];
+                for (const c of needsNotify) {
+                    const name = resolveDisplayName(cfg, c.accountId);
+                    directLines.push(`🔑 Keychat agent "${name}" is ready!`, `npub: ${c.npub}`, `📱 Add contact: ${c.contactUrl}`);
+                    // Also try to send per-account QR image
+                    const { qrCodePath } = await import("./paths.js");
+                    const qrPath = qrCodePath(c.accountId);
+                    sendToActiveChannels({
+                        message: directLines.join("\n"),
+                        qrPath: existsSync(qrPath) ? qrPath : undefined,
+                    }).catch((e) => {
+                        ctx.log?.warn?.(`sendToActiveChannels failed: ${e?.message ?? e}`);
+                    });
+                    directLines.length = 0;
+                }
+            }
+            // Mark all as notified
+            for (const c of needsNotify) {
+                const marker = join(KEYCHAT_DIR, `.notified-${c.accountId}`);
+                writeFileSync(marker, new Date().toISOString());
+            }
+        }
+        catch (err) {
+            ctx.log?.warn?.(`Failed to send summary notification: ${err}`);
+        }
+    }, SUMMARY_DEBOUNCE_MS);
+}
+function getPeerSubscribedAddresses(accountId) {
+    let m = peerSubscribedAddressesByAccount.get(accountId);
+    if (!m) {
+        m = new Map();
+        peerSubscribedAddressesByAccount.set(accountId, m);
+    }
+    return m;
+}
+// Minimum addresses to keep per peer after lazy cleanup (matches Keychat app: remainReceiveKeyPerRoom=2).
+// Old addresses are only cleaned up when a message is received on a newer address,
+// confirming the peer has moved on. Never delete proactively (e.g. at startup or after send).
+const REMAIN_RECEIVE_KEYS_PER_PEER = 5;
+// ═══════════════════════════════════════════════════════════════════════════
+// MLS (Large Group) state
+// ═══════════════════════════════════════════════════════════════════════════
+/** Map listen_key → group_id for routing inbound MLS messages */
+const mlsListenKeyToGroup = new Map();
+/** Set of MLS-initialized account IDs */
+const mlsInitialized = new Set();
+/**
+ * Normalize a pubkey: strip nostr: prefix, handle npub/hex.
+ */
+function normalizePubkey(input) {
+    const trimmed = input.replace(/^nostr:/i, "").replace(/^keychat:/i, "").trim();
+    // If it's hex, lowercase it
+    if (/^[0-9a-fA-F]{64}$/.test(trimmed)) {
+        return trimmed.toLowerCase();
+    }
+    // Decode npub (bech32) to hex so all keys use a consistent format
+    if (trimmed.startsWith("npub1")) {
+        try {
+            const decoded = bech32Decode(trimmed);
+            if (decoded)
+                return decoded.toLowerCase();
+        }
+        catch { /* fall through */ }
+    }
+    return trimmed;
+}
+/** Decode bech32 npub to hex pubkey. */
+function bech32Decode(npub) {
+    const CHARSET = "qpzry9x8gf2tvdw0s3jn54khce6mua7l";
+    const pos = npub.lastIndexOf("1");
+    if (pos < 1)
+        return null;
+    const data = [];
+    for (let i = pos + 1; i < npub.length; i++) {
+        const v = CHARSET.indexOf(npub.charAt(i));
+        if (v === -1)
+            return null;
+        data.push(v);
+    }
+    // Remove 6-char checksum
+    const values = data.slice(0, -6);
+    // Convert from 5-bit groups to 8-bit bytes
+    let acc = 0, bits = 0;
+    const result = [];
+    for (const v of values) {
+        acc = (acc << 5) | v;
+        bits += 5;
+        if (bits >= 8) {
+            bits -= 8;
+            result.push((acc >> bits) & 0xff);
+        }
+    }
+    if (result.length !== 32)
+        return null;
+    return result.map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+export const keychatPlugin = {
+    id: "keychat",
+    meta: {
+        id: "keychat",
+        label: "Keychat",
+        selectionLabel: "Keychat (E2E Encrypted)",
+        docsPath: "/channels/keychat",
+        docsLabel: "keychat",
+        blurb: "Sovereign identity + E2E encrypted chat via Keychat protocol. Agent generates its own Public Key ID.",
+        order: 50,
+    },
+    capabilities: {
+        chatTypes: ["direct", "group"],
+        media: true,
+    },
+    reload: { configPrefixes: ["channels.keychat"] },
+    configSchema: buildChannelConfigSchema(KeychatConfigSchema),
+    config: {
+        listAccountIds: (cfg) => listKeychatAccountIds(cfg),
+        resolveAccount: (cfg, accountId) => resolveKeychatAccount({ cfg, accountId }),
+        defaultAccountId: (cfg) => resolveDefaultKeychatAccountId(cfg),
+        isConfigured: (account) => account.configured,
+        describeAccount: (account) => ({
+            accountId: account.accountId,
+            name: account.name,
+            enabled: account.enabled,
+            configured: account.configured,
+            publicKey: account.publicKey,
+            ...(account.lightningAddress ? { lightningAddress: account.lightningAddress } : {}),
+        }),
+        resolveAllowFrom: ({ cfg, accountId }) => (resolveKeychatAccount({ cfg, accountId }).config.allowFrom ?? []).map((entry) => String(entry)),
+        formatAllowFrom: ({ allowFrom }) => allowFrom
+            .map((entry) => String(entry).trim())
+            .filter(Boolean)
+            .map((entry) => {
+            if (entry === "*")
+                return "*";
+            return normalizePubkey(entry);
+        })
+            .filter(Boolean),
+    },
+    pairing: {
+        idLabel: "keychatPubkey",
+        normalizeAllowEntry: (entry) => normalizePubkey(entry),
+        notifyApproval: async ({ id }) => {
+            // Look up which account this peer's pairing request came from
+            const aid = getAccountIdForPairingPeer(id) ?? DEFAULT_ACCOUNT_ID;
+            try {
+                const bridge = await waitForBridge(aid, 10000);
+                const approveResult = await bridge.sendMessage(id, "✅ Pairing approved! You can now chat with this agent.");
+                await handleReceivingAddressRotation(bridge, aid, approveResult, id);
+            }
+            catch {
+                // If specific account bridge fails, don't try others — wrong account = wrong identity
+                console.error(`[keychat] notifyApproval: failed to send via account ${aid} to ${id}`);
+            }
+        },
+    },
+    security: {
+        resolveDmPolicy: ({ cfg, account, accountId }) => {
+            const channelCfg = cfg.channels?.keychat;
+            const isMultiAccount = channelCfg?.accounts && Object.keys(channelCfg.accounts).length > 0;
+            const prefix = isMultiAccount
+                ? `channels.keychat.accounts.${accountId ?? DEFAULT_ACCOUNT_ID}`
+                : "channels.keychat";
+            return {
+                policy: account.config.dmPolicy ?? "pairing",
+                allowFrom: account.config.allowFrom ?? [],
+                policyPath: `${prefix}.dmPolicy`,
+                allowFromPath: `${prefix}.allowFrom`,
+                approveHint: formatPairingApproveHint("keychat"),
+                normalizeEntry: (raw) => normalizePubkey(raw),
+            };
+        },
+    },
+    messaging: {
+        normalizeTarget: (target) => {
+            const trimmed = target.trim();
+            if (trimmed.startsWith("group:") || trimmed.startsWith("mls-group:")) {
+                return trimmed;
+            }
+            return normalizePubkey(trimmed);
+        },
+        targetResolver: {
+            looksLikeId: (input) => {
+                const trimmed = input.trim();
+                return (trimmed.startsWith("npub1") ||
+                    /^[0-9a-fA-F]{64}$/.test(trimmed) ||
+                    trimmed.startsWith("group:") ||
+                    trimmed.startsWith("mls-group:"));
+            },
+            hint: "<npub|hex pubkey|group:ID|mls-group:ID>",
+        },
+    },
+    outbound: {
+        deliveryMode: "direct",
+        textChunkLimit: 4000,
+        sendText: async ({ to, text, accountId }) => {
+            console.log(`[keychat] outbound sendText called: to=${to} textLen=${(text ?? "").length} accountId=${accountId ?? "(default)"}`);
+            const aid = accountId ?? DEFAULT_ACCOUNT_ID;
+            const bridge = await waitForBridge(aid);
+            const core = getKeychatRuntime();
+            const tableMode = core.channel.text.resolveMarkdownTableMode({
+                cfg: core.config.loadConfig(),
+                channel: "keychat",
+                accountId: aid,
+            });
+            const message = stripReasoningPrefix(core.channel.text.convertMarkdownTables(text ?? "", tableMode));
+            const normalizedTo = normalizePubkey(to);
+            // Handle small group (Signal group) — route through sendGroupMessage (fan-out to each member)
+            const smallGroupMatch = normalizedTo.match(/^group:(.+)$/);
+            if (smallGroupMatch) {
+                const groupId = smallGroupMatch[1];
+                try {
+                    const result = await retrySend(() => bridge.sendGroupMessage(groupId, message));
+                    // Handle receiving address rotation for each group member
+                    if (result.member_rotations?.length) {
+                        for (const rot of result.member_rotations) {
+                            await handleReceivingAddressRotation(bridge, aid, { my_new_inbox: rot.my_new_inbox }, rot.member);
+                        }
+                    }
+                    return {
+                        channel: "keychat",
+                        to: normalizedTo,
+                        messageId: result.event_ids?.[0] || `group-${Date.now()}`,
+                    };
+                }
+                catch (err) {
+                    console.warn(`[keychat] [${aid}] sendText to small group ${groupId} failed: ${err}`);
+                    return {
+                        channel: "keychat",
+                        to: normalizedTo,
+                        messageId: `error-${Date.now()}`,
+                    };
+                }
+            }
+            // Handle MLS group — route through mlsSendMessage
+            const mlsGroupMatchText = normalizedTo.match(/^mls-group:(.+)$/);
+            if (mlsGroupMatchText) {
+                const groupId = mlsGroupMatchText[1];
+                try {
+                    const result = await retrySend(() => bridge.mlsSendMessage(groupId, message));
+                    return {
+                        channel: "keychat",
+                        to: normalizedTo,
+                        messageId: result.event_id,
+                    };
+                }
+                catch (err) {
+                    console.warn(`[keychat] [${aid}] sendText to MLS group ${groupId} failed: ${err}`);
+                    return {
+                        channel: "keychat",
+                        to: normalizedTo,
+                        messageId: `error-${Date.now()}`,
+                    };
+                }
+            }
+            // Handle /reset signal command — reset Signal session and re-send hello
+            if (message.trim() === "/reset signal") {
+                const result = await resetPeerSession(normalizedTo, aid, true);
+                console.log(`[keychat] [${aid}] Reset session result for ${normalizedTo}:`, result);
+                return {
+                    channel: "keychat",
+                    to: normalizedTo,
+                    messageId: `reset-${Date.now()}`,
+                };
+            }
+            // Check if we have a session with this peer (placeholder mappings with empty signalPubkey don't count).
+            const existingPeer = getPeerSessions(aid).get(normalizedTo);
+            const hasSession = !!(existingPeer && existingPeer.signalPubkey) || friendRequestManager.hasSession(aid, normalizedTo);
+            if (!hasSession) {
+                // Defensive: never send hello to non-pubkey targets (group IDs, prefixed targets, etc.)
+                if (normalizedTo.includes(":")) {
+                    console.warn(`[keychat] [${aid}] sendText target "${normalizedTo}" is not a peer pubkey, skipping hello`);
+                    return {
+                        channel: "keychat",
+                        to: normalizedTo,
+                        messageId: `skip-${Date.now()}`,
+                    };
+                }
+                // Protocol Step 1: No session yet, send friend request (kind:1059 Gift Wrap).
+                console.log(`[keychat] No session with ${normalizedTo}, initiating hello...`);
+                try {
+                    const helloConfig = core.config.loadConfig();
+                    const name = resolveDisplayName(helloConfig, aid);
+                    await friendRequestManager.ensureOutgoingHelloAndHandshakeSubscriptions(bridge, aid, normalizedTo, name);
+                }
+                catch (err) {
+                    const reason = err instanceof Error ? err.message : String(err);
+                    throw new Error(`Failed to send friend request hello to ${normalizedTo}: ${reason}`);
+                }
+                // Protocol Step 3/4 window: queue outbound app messages until accept-first establishes session.
+                return friendRequestManager.queueUntilSession(bridge, aid, normalizedTo, message);
+            }
+            // Existing session — send directly
+            try {
+                const result = await retrySend(() => bridge.sendMessage(normalizedTo, message));
+                // Handle receiving address rotation
+                await handleReceivingAddressRotation(bridge, aid, result, normalizedTo);
+                return {
+                    channel: "keychat",
+                    to: normalizedTo,
+                    messageId: result.event_id,
+                };
+            }
+            catch (err) {
+                // Queue for later delivery instead of throwing
+                queueOutbound(normalizedTo, message, aid);
+                console.warn(`[keychat] sendText failed, queued for retry: ${err}`);
+                return {
+                    channel: "keychat",
+                    to: normalizedTo,
+                    messageId: `queued-${Date.now()}`,
+                };
+            }
+        },
+        sendMedia: async ({ to, text, mediaUrl: incomingMediaUrl, filePath, buffer, accountId }) => {
+            console.log(`[keychat] outbound sendMedia called: to=${to} mediaUrl=${incomingMediaUrl} filePath=${filePath} textLen=${(text ?? "").length} accountId=${accountId ?? "(default)"}`);
+            const aid = accountId ?? DEFAULT_ACCOUNT_ID;
+            const bridge = await waitForBridge(aid);
+            let mediaUrl = incomingMediaUrl ?? "";
+            // If mediaUrl is a local file path (not http), treat it as filePath
+            if (mediaUrl && !mediaUrl.startsWith("http://") && !mediaUrl.startsWith("https://")) {
+                filePath = filePath || mediaUrl;
+                mediaUrl = "";
+                console.log(`[keychat] sendMedia: local path detected, filePath=${filePath}`);
+            }
+            console.log(`[keychat] sendMedia: pre-upload — mediaUrl="${mediaUrl}" filePath="${filePath}" hasBuffer=${!!buffer}`);
+            console.log(`[keychat] sendMedia: pre-upload — mediaUrl="${mediaUrl}" filePath="${filePath}" hasBuffer=${!!buffer}`);
+            // If a local file or buffer is provided (but no pre-resolved mediaUrl),
+            // encrypt and upload via Blossom, then use the resulting media URL.
+            if (!mediaUrl && (filePath || buffer)) {
+                let uploadPath = filePath;
+                if (!uploadPath && buffer) {
+                    // Save buffer to a temp file for encryptAndUpload
+                    uploadPath = join(tmpdir(), `keychat-upload-${Date.now()}`);
+                    await writeFileAsync(uploadPath, buffer);
+                }
+                if (uploadPath) {
+                    const core = getKeychatRuntime();
+                    const cfg = core.config.loadConfig();
+                    const acct = resolveKeychatAccount({ cfg, accountId: aid });
+                    const signEvent = (content, tags) => bridge.signBlossomEvent(content, tags);
+                    console.log(`[keychat] sendMedia: uploading ${uploadPath} to ${acct.mediaServer || "default"}`);
+                    const result = await encryptAndUpload(uploadPath, signEvent, acct.mediaServer);
+                    console.log(`[keychat] sendMedia: upload done — ${result.mediaUrl}`);
+                    console.log(`[keychat] sendMedia: upload complete — mediaUrl=${result.mediaUrl}...`);
+                    mediaUrl = result.mediaUrl;
+                }
+            }
+            // Send the media URL as a message (same as Keychat app)
+            const caption = text;
+            // App parses content with Uri.parse() — caption after URL breaks parsing.
+            // Send URL only as the media message; caption as a separate text message if needed.
+            const messageText = mediaUrl;
+            console.log(`[keychat] sendMedia: final messageTextLen=${messageText.length}`);
+            console.log(`[keychat] sendMedia: messageTextLen=${messageText.length}`);
+            // Check if target is a small group (Signal group — fan-out to each member)
+            const normalizedTo = normalizePubkey(to);
+            const smallGroupMatch = normalizedTo.match(/^group:(.+)$/);
+            if (smallGroupMatch) {
+                const groupId = smallGroupMatch[1];
+                try {
+                    const result = await retrySend(() => bridge.sendGroupMessage(groupId, messageText));
+                    if (result.member_rotations?.length) {
+                        for (const rot of result.member_rotations) {
+                            await handleReceivingAddressRotation(bridge, aid, { my_new_inbox: rot.my_new_inbox }, rot.member);
+                        }
+                    }
+                    return {
+                        channel: "keychat",
+                        to: normalizedTo,
+                        messageId: result.event_ids?.[0] || `group-media-${Date.now()}`,
+                    };
+                }
+                catch (err) {
+                    console.warn(`[keychat] sendMedia to small group ${groupId} failed: ${err}`);
+                    return {
+                        channel: "keychat",
+                        to: normalizedTo,
+                        messageId: `failed-${Date.now()}`,
+                    };
+                }
+            }
+            // Check if target is an MLS group
+            const mlsGroupMatch = normalizedTo.match(/^mls-group:(.+)$/);
+            if (mlsGroupMatch) {
+                const groupId = mlsGroupMatch[1];
+                try {
+                    const result = await retrySend(() => bridge.mlsSendMessage(groupId, messageText));
+                    return {
+                        channel: "keychat",
+                        to,
+                        messageId: result.event_id,
+                    };
+                }
+                catch (err) {
+                    console.warn(`[keychat] sendMedia to MLS group failed: ${err}`);
+                    return {
+                        channel: "keychat",
+                        to,
+                        messageId: `failed-${Date.now()}`,
+                    };
+                }
+            }
+            // 1:1 DM
+            try {
+                const result = await retrySend(() => bridge.sendMessage(normalizedTo, messageText));
+                await handleReceivingAddressRotation(bridge, aid, result, normalizedTo);
+                return {
+                    channel: "keychat",
+                    to: normalizedTo,
+                    messageId: result.event_id,
+                };
+            }
+            catch (err) {
+                queueOutbound(normalizedTo, messageText, aid);
+                console.warn(`[keychat] sendMedia failed, queued for retry: ${err}`);
+                return {
+                    channel: "keychat",
+                    to: normalizedTo,
+                    messageId: `queued-${Date.now()}`,
+                };
+            }
+        },
+    },
+    status: {
+        defaultRuntime: {
+            accountId: DEFAULT_ACCOUNT_ID,
+            running: false,
+            lastStartAt: null,
+            lastStopAt: null,
+            lastError: null,
+        },
+        collectStatusIssues: (accounts) => {
+            const issues = [];
+            // Check bridge binary exists (shared across all accounts)
+            const bridgePath = join(import.meta.dirname ?? __dirname, "..", "bridge", "target", "release", "keychat-openclaw");
+            if (!existsSync(bridgePath)) {
+                issues.push({
+                    channel: "keychat",
+                    accountId: accounts[0]?.accountId ?? DEFAULT_ACCOUNT_ID,
+                    kind: "runtime",
+                    message: "Bridge binary not found (will auto-download on start)",
+                });
+            }
+            // Check peer sessions — warn if ALL accounts have zero peers
+            const anyPeers = [...peerSessionsByAccount.values()].some((m) => m.size > 0);
+            if (!anyPeers) {
+                issues.push({
+                    channel: "keychat",
+                    accountId: accounts[0]?.accountId ?? DEFAULT_ACCOUNT_ID,
+                    kind: "runtime",
+                    message: "No peers connected yet",
+                });
+            }
+            // Check Signal DB exists for each account
+            for (const account of accounts) {
+                const dbPath = signalDbPath(account.accountId);
+                if (!existsSync(dbPath)) {
+                    issues.push({
+                        channel: "keychat",
+                        accountId: account.accountId,
+                        kind: "runtime",
+                        message: "Signal DB file missing",
+                    });
+                }
+                // Per-account errors
+                const lastError = typeof account.lastError === "string" ? account.lastError.trim() : "";
+                if (lastError) {
+                    issues.push({
+                        channel: "keychat",
+                        accountId: account.accountId,
+                        kind: "runtime",
+                        message: `Channel error: ${lastError}`,
+                    });
+                }
+            }
+            return issues;
+        },
+        buildChannelSummary: ({ snapshot }) => ({
+            configured: snapshot.configured ?? false,
+            publicKey: snapshot.publicKey ?? null,
+            npub: snapshot.npub ?? null,
+            running: snapshot.running ?? false,
+            lastStartAt: snapshot.lastStartAt ?? null,
+            lastStopAt: snapshot.lastStopAt ?? null,
+            lastError: snapshot.lastError ?? null,
+        }),
+        buildAccountSnapshot: ({ account, runtime }) => ({
+            accountId: account.accountId,
+            name: account.name,
+            enabled: account.enabled,
+            configured: account.configured,
+            publicKey: account.publicKey,
+            running: runtime?.running ?? false,
+            lastStartAt: runtime?.lastStartAt ?? null,
+            lastStopAt: runtime?.lastStopAt ?? null,
+            lastError: runtime?.lastError ?? null,
+            lastInboundAt: runtime?.lastInboundAt ?? null,
+            lastOutboundAt: runtime?.lastOutboundAt ?? null,
+        }),
+    },
+    gateway: {
+        startAccount: async (ctx) => {
+            const runtime = getKeychatRuntime();
+            const account = ctx.account;
+            ctx.log?.info(`[${account.accountId}] Starting Keychat channel...`);
+            ctx.log?.info(`[${account.accountId}] DEBUG account keys: ${Object.keys(account).join(',')}, relays type: ${typeof account.relays}, relays: ${Array.isArray(account.relays) ? account.relays.length : 'not-array'}`);
+            // Clean up any existing bridge from a previous start
+            const oldBridge = activeBridges.get(account.accountId);
+            if (oldBridge) {
+                ctx.log?.info(`[${account.accountId}] Cleaning up previous bridge instance`);
+                try {
+                    oldBridge.disableAutoRestart();
+                    await oldBridge.stop();
+                }
+                catch {
+                    // Best effort — old bridge may already be dead
+                }
+                activeBridges.delete(account.accountId);
+            }
+            // 1. Start the Rust bridge sidecar (auto-download binary if missing)
+            ctx.log?.info(`[${account.accountId}] DEBUG: step 1a ensureBinary...`);
+            await ensureBinary();
+            ctx.log?.info(`[${account.accountId}] DEBUG: step 1b new KeychatBridgeClient...`);
+            const bridge = new KeychatBridgeClient();
+            ctx.log?.info(`[${account.accountId}] DEBUG: step 1c bridge.start()...`);
+            await bridge.start();
+            ctx.log?.info(`[${account.accountId}] Bridge sidecar started`);
+            // 2. Initialize Signal Protocol DB
+            const dbPath = `~/.openclaw/keychat/signal-${account.accountId}.db`;
+            await bridge.init(dbPath);
+            ctx.log?.info(`[${account.accountId}] Signal DB initialized`);
+            // 3. Generate or restore identity
+            // Mnemonic source: system keychain (only). Config mnemonic is legacy → migrate & delete.
+            let info;
+            // Legacy migration: if mnemonic is still in config, move it to keychain first
+            if (account.mnemonic) {
+                await storeMnemonic(account.accountId, account.mnemonic);
+                ctx.log?.info(`[${account.accountId}] Legacy mnemonic migrated to system keychain`);
+                await configWriteLock(async () => {
+                    await runtime.config.mutateConfigFile({
+                        afterWrite: { mode: "auto" },
+                        mutate(draft) {
+                            const channels = (draft.channels ?? {});
+                            const keychatCfg = (channels.keychat ?? {});
+                            delete keychatCfg.mnemonic;
+                            const accounts = (keychatCfg.accounts ?? {});
+                            const acct = accounts[account.accountId];
+                            if (acct)
+                                delete acct.mnemonic;
+                            draft.channels = { ...channels, keychat: keychatCfg };
+                        },
+                    });
+                });
+                ctx.log?.info(`[${account.accountId}] Mnemonic removed from config`);
+            }
+            // Read mnemonic from keychain (the only legitimate source)
+            const mnemonic = await retrieveMnemonic(account.accountId);
+            if (mnemonic) {
+                info = await bridge.importIdentity(mnemonic);
+                ctx.log?.info(`[${account.accountId}] Identity restored from keychain`);
+            }
+            else {
+                // Before generating a new identity, ensure system keychain is available.
+                // Without keychain, the mnemonic cannot be stored securely and the identity
+                // would be lost on restart, causing a new identity every time.
+                let keychainCheck = checkKeychainAvailable();
+                if (!keychainCheck.available) {
+                    // Try to auto-install keychain dependencies
+                    ctx.log?.info(`[${account.accountId}] System keychain unavailable (${keychainCheck.reason}), attempting auto-fix...`);
+                    const fixed = autoFixKeychain(ctx.log);
+                    if (fixed) {
+                        keychainCheck = checkKeychainAvailable();
+                    }
+                    if (!keychainCheck.available) {
+                        const msg = [
+                            `[${account.accountId}] ❌ Cannot generate Keychat identity: system keychain unavailable.`,
+                            `Reason: ${keychainCheck.reason}`,
+                            ``,
+                            `🔧 ${keychainCheck.hint}`,
+                            ``,
+                            `The mnemonic (private key) must be stored in the system keychain for security.`,
+                            `Keychat will not start until the keychain is available.`,
+                        ].join("\n");
+                        ctx.log?.error(msg);
+                        throw new Error(`System keychain unavailable: ${keychainCheck.reason}`);
+                    }
+                }
+                // Generate new identity
+                info = await bridge.generateIdentity();
+                ctx.log?.info(`[${account.accountId}] New Keychat identity generated: ${info.pubkey_npub}`);
+                // Store mnemonic in system keychain ONLY (never config, never plain file)
+                const stored = await storeMnemonic(account.accountId, info.mnemonic);
+                if (!stored) {
+                    ctx.log?.error(`[${account.accountId}] ❌ Failed to store mnemonic in keychain. Identity will be lost on restart.`);
+                }
+                // Do NOT write publicKey/npub to config — it triggers gateway hot-reload loops.
+                // npub is exposed via setStatus() for the Control UI instead.
+                // Mnemonic is already stored in keychain or file above.
+            }
+            accountInfoCache.set(account.accountId, info);
+            // 4. Generate pre-key bundle (for Signal handshake with peers)
+            const bundle = await bridge.generatePrekeyBundle();
+            ctx.log?.info(`[${account.accountId}] Pre-key bundle generated`);
+            // 5. Connect to Nostr relays
+            await bridge.connect(account.relays);
+            ctx.log?.info(`[${account.accountId}] Connected to ${account.relays.length} relay(s)`);
+            // 6. Log the agent's Keychat ID for the owner
+            const contactUrl = `https://www.keychat.io/u/?k=${info.pubkey_npub}`;
+            const qrPath = qrCodePath(account.accountId);
+            // Generate QR codes (best-effort)
+            let qrTerminal = "";
+            try {
+                const { generateQRTerminal } = await import("./qrcode.js");
+                qrTerminal = await generateQRTerminal(contactUrl);
+            }
+            catch { /* qrcode not installed, skip */ }
+            // Also save PNG for sharing (best-effort)
+            try {
+                mkdirSync(WORKSPACE_KEYCHAT_DIR, { recursive: true });
+                const QRCode = await import("qrcode");
+                await QRCode.toFile(qrPath, contactUrl, { width: 256 });
+            }
+            catch { /* skip */ }
+            const cfg = runtime.config.current();
+            const displayName = resolveDisplayName(cfg, account.accountId, account.name);
+            ctx.log?.info(`\n` +
+                `═══════════════════════════════════════════════════\n` +
+                `  🔑 ${displayName} — Keychat ID:\n` +
+                `\n` +
+                `  ${info.pubkey_npub}\n` +
+                `\n` +
+                `  📱 Add contact (tap or scan):\n` +
+                `  ${contactUrl}\n` +
+                (qrTerminal ? `\n${qrTerminal}\n` : ``) +
+                `═══════════════════════════════════════════════════\n`);
+            // Schedule a debounced summary notification covering all agents.
+            // Only fires on first install (per-account markers prevent repeats on restart).
+            scheduleSummaryNotification(ctx);
+            ctx.setStatus({
+                accountId: account.accountId,
+                npub: info.pubkey_npub,
+                publicKey: info.pubkey_hex,
+                contactUrl,
+                qrCodePath: qrPath,
+                running: true,
+                configured: true,
+                lastStartAt: Date.now(),
+            });
+            activeBridges.set(account.accountId, bridge);
+            // Report startup to health monitor — prevents premature stale-socket restart.
+            // Also start a periodic keepalive so idle periods (e.g. overnight) don't
+            // trigger stale-socket restarts. The health monitor threshold is 30 min;
+            // we ping every 20 min to stay well within that window.
+            ctx.setStatus({ lastEventAt: Date.now(), connected: true });
+            const HEALTH_KEEPALIVE_MS = 20 * 60 * 1000; // 20 minutes
+            const healthKeepaliveTimer = setInterval(() => {
+                ctx.setStatus({ lastEventAt: Date.now() });
+            }, HEALTH_KEEPALIVE_MS);
+            // 7. Restore peer sessions and receiving addresses from DB
+            console.log(`[keychat] [${account.accountId}] Step 7: restoring peer sessions...`);
+            try {
+                const { mappings } = await bridge.getPeerMappings();
+                console.log(`[keychat] [${account.accountId}] Step 7: getPeerMappings returned ${mappings.length} mapping(s)`);
+                if (mappings.length > 0) {
+                    ctx.log?.info(`[${account.accountId}] Restored ${mappings.length} peer mapping(s) from DB`);
+                    for (const m of mappings) {
+                        // Skip placeholder rows created by outgoing hello before reply arrives
+                        if (!m.peer_signal_key)
+                            continue;
+                        getPeerSessions(account.accountId).set(m.nostr_pubkey, {
+                            signalPubkey: m.peer_signal_key,
+                            deviceId: m.device_id,
+                            name: m.name,
+                            nostrPubkey: m.nostr_pubkey,
+                            localSignalPubkey: m.my_signal_key,
+                        });
+                        friendRequestManager.setSessionEstablished(account.accountId, m.nostr_pubkey);
+                    }
+                }
+                // Restore address-to-peer mappings from DB and populate peerSubscribedAddresses
+                console.log(`[keychat] [${account.accountId}] Step 7b: getting address mappings...`);
+                const { mappings: addrMappings } = await bridge.getReceivingAddresses();
+                console.log(`[keychat] [${account.accountId}] Step 7b: getReceivingAddresses returned ${addrMappings.length} mapping(s)`);
+                if (addrMappings.length > 0) {
+                    for (const am of addrMappings) {
+                        getAddressToPeer(account.accountId).set(am.address, am.peer_nostr_pubkey);
+                        // Track in peerSubscribedAddresses so cleanup works after restart
+                        const peerList = getPeerSubscribedAddresses(account.accountId).get(am.peer_nostr_pubkey) ?? [];
+                        peerList.push(am.address);
+                        getPeerSubscribedAddresses(account.accountId).set(am.peer_nostr_pubkey, peerList);
+                    }
+                    ctx.log?.info(`[${account.accountId}] Restored ${addrMappings.length} address-to-peer mapping(s) from DB`);
+                }
+                // Restore Protocol Step 1 WAIT_ACCEPT flows from persisted pending hello messages.
+                // This lets startup continue waiting for Protocol Step 3 accept-first on A_onetimekey.
+                const mappedPeers = new Set(addrMappings.map((m) => m.peer_nostr_pubkey));
+                let restoredWaitAcceptPeers = 0;
+                for (const peerPubkey of mappedPeers) {
+                    try {
+                        const { messages } = await bridge.getPendingHelloMessages(peerPubkey);
+                        if (messages.length === 0)
+                            continue;
+                        friendRequestManager.restoreWaitAccept(account.accountId, peerPubkey);
+                        restoredWaitAcceptPeers++;
+                    }
+                    catch {
+                        // best effort per peer
+                    }
+                }
+                if (restoredWaitAcceptPeers > 0) {
+                    ctx.log?.info(`[${account.accountId}] Restored WAIT_ACCEPT for ${restoredWaitAcceptPeers} pending hello peer(s)`);
+                }
+                // Address sync from Signal sessions removed — DB is authoritative after
+                // sendGroupMessage/sendMessage address rotation fix.
+                // Subscribe to all receiving addresses
+                const toSubscribe = Array.from(getAddressToPeer(account.accountId).keys());
+                if (toSubscribe.length > 0) {
+                    await bridge.addSubscription(toSubscribe);
+                    ctx.log?.info(`[${account.accountId}] Subscribed to ${toSubscribe.length} receiving address(es)`);
+                }
+            }
+            catch (err) {
+                ctx.log?.error(`[${account.accountId}] Failed to restore sessions from DB: ${err}`);
+                console.error(`[keychat] [${account.accountId}] Failed to restore sessions from DB:`, err);
+            }
+            // 7c. Clean up orphaned Signal session rows (no matching peer_mapping)
+            try {
+                const cleanup = await bridge.cleanupOrphanedSessions();
+                if (cleanup.deleted_count > 0) {
+                    ctx.log?.info(`[${account.accountId}] Cleaned up ${cleanup.deleted_count} orphaned session row(s)`);
+                }
+            }
+            catch (err) {
+                console.error(`[keychat] [${account.accountId}] Failed to clean up orphaned sessions:`, err);
+            }
+            // 8. Restore groups from DB
+            try {
+                const { groups } = await bridge.getAllGroups();
+                if (groups.length > 0) {
+                    ctx.log?.info(`[${account.accountId}] Restored ${groups.length} group(s) from DB`);
+                    for (const g of groups) {
+                        ctx.log?.info(`[${account.accountId}]   Group: ${g.group_id}`);
+                    }
+                }
+            }
+            catch (err) {
+                ctx.log?.error(`[${account.accountId}] Failed to restore groups from DB: ${err}`);
+            }
+            // 9. Initialize MLS (large group support)
+            try {
+                const mlsDbPath = dbPath.replace(/\.db$/, "-mls.db");
+                await bridge.mlsInit(mlsDbPath);
+                mlsInitialized.add(account.accountId);
+                ctx.log?.info(`[${account.accountId}] MLS initialized`);
+                // Publish KeyPackage (kind:10443) so others can invite us to MLS groups
+                try {
+                    const kpResult = await bridge.mlsPublishKeyPackage();
+                    ctx.log?.info(`[${account.accountId}] MLS KeyPackage published (event ${kpResult.event_id})`);
+                }
+                catch (err) {
+                    ctx.log?.error(`[${account.accountId}] Failed to publish MLS KeyPackage: ${err}`);
+                }
+                // Restore MLS groups — listen keys come from DB (address_peer_mapping),
+                // same as Signal ratchet addresses. No need to re-derive from MLS state.
+                const { groups: mlsGroups } = await bridge.mlsGetGroups();
+                for (const groupId of mlsGroups) {
+                    try {
+                        const mlsPeerKey = `mls:${groupId}`;
+                        // Find listen key from DB (already loaded in Step 7b)
+                        let listenKey;
+                        for (const [addr, peer] of getAddressToPeer(account.accountId).entries()) {
+                            if (peer === mlsPeerKey) {
+                                listenKey = addr;
+                                break;
+                            }
+                        }
+                        if (!listenKey) {
+                            // First time or DB was cleared — derive from MLS state
+                            const { listen_key } = await bridge.mlsGetListenKey(groupId);
+                            listenKey = listen_key;
+                            getAddressToPeer(account.accountId).set(listenKey, mlsPeerKey);
+                            try {
+                                await bridge.saveReceivingAddress(listenKey, mlsPeerKey);
+                            }
+                            catch { /* */ }
+                        }
+                        mlsListenKeyToGroup.set(listenKey, groupId);
+                        await bridge.addSubscription([listenKey]);
+                        const info = await bridge.mlsGetGroupInfo(groupId);
+                        ctx.log?.info(`[${account.accountId}] MLS group restored: ${groupId}, listen key: ${listenKey}`);
+                    }
+                    catch (err) {
+                        ctx.log?.error(`[${account.accountId}] Failed to restore MLS group ${groupId}: ${err}`);
+                    }
+                }
+            }
+            catch (err) {
+                ctx.log?.error(`[${account.accountId}] MLS init failed (non-fatal): ${err}`);
+            }
+            // 10. Initialize NWC (Nostr Wallet Connect) if configured
+            if (account.nwcUri) {
+                try {
+                    const { initNwc } = await import("./nwc.js");
+                    const nwc = await initNwc(account.nwcUri);
+                    const desc = nwc.describe();
+                    ctx.log?.info(`[${account.accountId}] ⚡ NWC connected: relay=${desc.relay}, wallet=${desc.walletPubkey.slice(0, 16)}...`);
+                    try {
+                        const balSats = await nwc.getBalanceSats();
+                        ctx.log?.info(`[${account.accountId}] ⚡ Wallet balance: ${balSats} sats`);
+                    }
+                    catch (err) {
+                        ctx.log?.info(`[${account.accountId}] ⚡ NWC connected (balance check not supported or failed: ${err})`);
+                    }
+                }
+                catch (err) {
+                    ctx.log?.error(`[${account.accountId}] NWC init failed (non-fatal): ${err}`);
+                }
+            }
+            // Cache init args for auto-restart (mnemonic excluded — read from keychain on restart).
+            bridge.setInitArgs({ dbPath, relays: account.relays });
+            // Register keychain lookup for restart — mnemonic is always read from keychain, never cached.
+            bridge.setMnemonicResolver(async () => {
+                try {
+                    return await retrieveMnemonic(account.accountId);
+                }
+                catch {
+                    return null;
+                }
+            });
+            // Register post-restart hook to restore peer sessions and subscriptions
+            bridge.setRestartHook(async () => {
+                ctx.log?.info(`[${account.accountId}] Restoring sessions after bridge restart...`);
+                try {
+                    // Re-generate pre-key bundle
+                    await bridge.generatePrekeyBundle();
+                    // Restore peer mappings
+                    const { mappings } = await bridge.getPeerMappings();
+                    for (const m of mappings) {
+                        if (!m.peer_signal_key)
+                            continue;
+                        getPeerSessions(account.accountId).set(m.nostr_pubkey, {
+                            signalPubkey: m.peer_signal_key,
+                            deviceId: m.device_id,
+                            name: m.name,
+                            nostrPubkey: m.nostr_pubkey,
+                        });
+                        friendRequestManager.setSessionEstablished(account.accountId, m.nostr_pubkey);
+                    }
+                    // Restore address→peer mappings and peerSubscribedAddresses
+                    const { mappings: addrMappings } = await bridge.getReceivingAddresses();
+                    getPeerSubscribedAddresses(account.accountId).clear();
+                    for (const am of addrMappings) {
+                        getAddressToPeer(account.accountId).set(am.address, am.peer_nostr_pubkey);
+                        const peerList = getPeerSubscribedAddresses(account.accountId).get(am.peer_nostr_pubkey) ?? [];
+                        peerList.push(am.address);
+                        getPeerSubscribedAddresses(account.accountId).set(am.peer_nostr_pubkey, peerList);
+                    }
+                    const restartMappedPeers = new Set(addrMappings.map((m) => m.peer_nostr_pubkey));
+                    for (const peerPubkey of restartMappedPeers) {
+                        try {
+                            const { messages } = await bridge.getPendingHelloMessages(peerPubkey);
+                            if (messages.length > 0) {
+                                friendRequestManager.restoreWaitAccept(account.accountId, peerPubkey);
+                            }
+                        }
+                        catch { /* best effort */ }
+                    }
+                    // Re-subscribe to receiving addresses from address_peer_mapping
+                    const toSubRestart = Array.from(getAddressToPeer(account.accountId).keys());
+                    if (toSubRestart.length > 0) {
+                        await bridge.addSubscription(toSubRestart);
+                    }
+                    ctx.log?.info(`[${account.accountId}] Sessions restored: ${mappings.length} peer(s), ${addrMappings.length} address mapping(s)`);
+                    // Flush any pending outbound messages after restart
+                    await flushPendingOutbound();
+                }
+                catch (err) {
+                    ctx.log?.error(`[${account.accountId}] Failed to restore sessions after restart: ${err}`);
+                }
+            });
+            // Start periodic health check (ping every 60s, restart if unresponsive)
+            bridge.startHealthCheck();
+            // Set up inbound message handler
+            bridge.setInboundHandler(async (msg) => {
+                try {
+                    // Report event to health monitor — prevents stale-socket restarts
+                    ctx.setStatus({ lastEventAt: Date.now() });
+                    ctx.log?.info(`[${account.accountId}] ▶ Inbound handler invoked: kind=${msg.event_kind} from=${msg.from_pubkey?.slice(0, 16)} to=${msg.arrived_at?.slice(0, 16)} prekey=${msg.is_prekey} event=${msg.event_id?.slice(0, 16)}`);
+                    // Deduplicate events — check in-memory first, then DB
+                    if (msg.event_id) {
+                        if (getSeenEventIds(account.accountId).has(msg.event_id)) {
+                            return; // Already processed (in-memory)
+                        }
+                        // Check persistent DB
+                        try {
+                            const { processed } = await bridge.isEventProcessed(msg.event_id);
+                            if (processed) {
+                                getSeenEventIds(account.accountId).add(msg.event_id);
+                                return; // Already processed (persisted)
+                            }
+                        }
+                        catch {
+                            // DB check failed — continue with processing
+                        }
+                    }
+                    if (msg.event_kind === 1059) {
+                        markProcessed(bridge, account.accountId, msg.event_id, msg.created_at);
+                        // Check if this is an MLS group message (arrived_at matches a known listen key)
+                        let mlsGroupId = msg.arrived_at ? mlsListenKeyToGroup.get(msg.arrived_at) : undefined;
+                        ctx.log?.info(`[${account.accountId}] Kind:1059 routing: arrived_at=${msg.arrived_at ?? 'null'}, inner_kind=${msg.inner_kind ?? 'null'}, mlsGroupId=${mlsGroupId ?? 'null'}, mlsKeys=[${[...mlsListenKeyToGroup.keys()].map(k => k.slice(0, 12)).join(',')}]`);
+                        // Fallback: check addressToPeer for MLS mapping
+                        if (!mlsGroupId && msg.arrived_at) {
+                            const peerTag = getAddressToPeer(account.accountId).get(msg.arrived_at);
+                            if (peerTag?.startsWith("mls:")) {
+                                mlsGroupId = peerTag.slice(4);
+                                mlsListenKeyToGroup.set(msg.arrived_at, mlsGroupId);
+                                ctx.log?.info(`[${account.accountId}] MLS fallback: restored listen key mapping for group ${mlsGroupId}`);
+                            }
+                        }
+                        if (mlsGroupId && !msg.inner_kind) {
+                            // ── MLS group message (raw kind:1059, not Gift Wrap) ──
+                            await handleMlsGroupMessage(bridge, account.accountId, mlsGroupId, msg, ctx, runtime);
+                        }
+                        else if (msg.inner_kind === 444) {
+                            // ── MLS Welcome (Gift Wrap with inner kind:444) ──
+                            await handleMlsWelcome(bridge, account.accountId, msg, ctx, runtime, cfg, account.name);
+                        }
+                        else {
+                            // ── Gift Wrap (friend request / hello) ──
+                            await handleFriendRequest(bridge, account.accountId, msg, ctx, runtime);
+                        }
+                    }
+                    else if (msg.event_kind === 4) {
+                        // ── Kind:4 DM ──
+                        markProcessed(bridge, account.accountId, msg.event_id, msg.created_at);
+                        if (msg.nip04_decrypted) {
+                            // NIP-04 pre-decrypted message (e.g., group invite via Nip4ChatService)
+                            // Skip Signal decrypt — plaintext is already in msg.text / msg.encrypted_content
+                            await handleNip04Message(bridge, account.accountId, msg, ctx, runtime, cfg, account.name);
+                        }
+                        else {
+                            // Signal-encrypted message — decrypt consumes message keys, cannot retry
+                            await handleEncryptedDM(bridge, account.accountId, msg, ctx, runtime);
+                        }
+                    }
+                    else {
+                        ctx.log?.info(`[${account.accountId}] Ignoring inbound event_kind=${msg.event_kind}`);
+                        markProcessed(bridge, account.accountId, msg.event_id, msg.created_at);
+                    }
+                }
+                catch (err) {
+                    ctx.log?.error(`[${account.accountId}] Error handling inbound message: ${err}`);
+                }
+            });
+            // Signal bridge readiness — unblock any queued outbound sends
+            const readyResolver = bridgeReadyResolvers.get(account.accountId);
+            if (readyResolver) {
+                readyResolver();
+                bridgeReadyResolvers.delete(account.accountId);
+                bridgeReadyPromises.delete(account.accountId);
+            }
+            // Keep the channel alive until abortSignal fires (OpenClaw expects startAccount
+            // to stay pending while the channel is running — resolving triggers auto-restart)
+            const abortSignal = ctx.abortSignal;
+            if (abortSignal) {
+                // Clean up health keepalive timer on channel shutdown
+                abortSignal.addEventListener("abort", () => clearInterval(healthKeepaliveTimer), { once: true });
+                await new Promise((resolve) => {
+                    if (abortSignal.aborted) {
+                        resolve();
+                        return;
+                    }
+                    abortSignal.addEventListener("abort", () => resolve(), { once: true });
+                });
+            }
+            else {
+                // Fallback: wait forever (shouldn't happen in practice)
+                await new Promise(() => { });
+            }
+            // Cleanup on abort
+            bridge.disableAutoRestart();
+            await bridge.disconnect();
+            await bridge.stop();
+            activeBridges.delete(account.accountId);
+            accountInfoCache.delete(account.accountId);
+            peerSessionsByAccount.delete(account.accountId);
+            addressToPeerByAccount.delete(account.accountId);
+            seenEventIdsByAccount.delete(account.accountId);
+            peerSubscribedAddressesByAccount.delete(account.accountId);
+            friendRequestManager.resetAccount(account.accountId);
+            bridgeReadyPromises.delete(account.accountId);
+            bridgeReadyResolvers.delete(account.accountId);
+            ctx.log?.info(`[${account.accountId}] Keychat provider stopped`);
+        },
+    },
+};
+// ═══════════════════════════════════════════════════════════════════════════
+// Inbound message helpers
+// ═══════════════════════════════════════════════════════════════════════════
+/** Handle a Gift Wrap (kind:1059) friend request. */
+async function handleFriendRequest(bridge, accountId, msg, ctx, runtime) {
+    // Serialize hello processing to prevent concurrent hellos from corrupting each other's sessions
+    const previousLock = helloProcessingLock;
+    let releaseLock;
+    helloProcessingLock = new Promise((resolve) => { releaseLock = resolve; });
+    await previousLock;
+    try {
+        await handleFriendRequestInner(bridge, accountId, msg, ctx, runtime);
+    }
+    finally {
+        releaseLock();
+    }
+}
+async function handleFriendRequestInner(bridge, accountId, msg, ctx, runtime) {
+    ctx.log?.info(`[${accountId}] Friend request (kind:1059) from ${msg.from_pubkey} (created_at=${msg.created_at})`);
+    // No time-based filtering here — the Rust bridge already sets `since` in relay
+    // subscriptions (last_seen - 3min buffer, same as Keychat app), and processed_events
+    // table handles deduplication. Stale events are never delivered to us.
+    // If we already have a session, re-process the hello to handle re-pairing
+    // (e.g. peer deleted us and re-added, or our previous hello reply wasn't received)
+    const existingPeer = getPeerSessions(accountId).get(msg.from_pubkey);
+    if (existingPeer) {
+        ctx.log?.info(`[${accountId}] Re-processing friend request from ${msg.from_pubkey} (existing session will be replaced)`);
+    }
+    // Check DM policy before processing — unified check via resolveDmAccess
+    const core = runtime;
+    const cfg = core.config.loadConfig();
+    const account = resolveKeychatAccount({ cfg, accountId });
+    const displayName = resolveDisplayName(cfg, accountId, account.name);
+    const helloAccess = resolveDmAccess(accountId, msg.from_pubkey, runtime);
+    if (helloAccess.decision === "block") {
+        ctx.log?.info(`[${accountId}] Rejecting friend request from ${msg.from_pubkey} — dmPolicy block`);
+        return;
+    }
+    let isPairingPending = helloAccess.decision === "pairing";
+    // Auto-approve first peer: if no one is in the allowlist yet, this is likely the owner
+    if (isPairingPending && !hasAnyAllowedPeers(accountId, runtime)) {
+        ctx.log?.info(`[${accountId}] Auto-approving first friend request from ${msg.from_pubkey} (no existing allowed peers)`);
+        appendKeychatAllowFromStore(msg.from_pubkey, accountId);
+        isPairingPending = false;
+    }
+    // Protocol Step 2/3/4: Process inbound friend request and establish Signal session.
+    const hello = await bridge.processHello(msg.encrypted_content);
+    if (!hello.session_established) {
+        ctx.log?.error(`[${accountId}] Failed to establish session from hello`);
+        return;
+    }
+    ctx.log?.info(`[${accountId}] Session established with peer ${hello.peer_nostr_pubkey.slice(0, 16)}... (signal: ${hello.peer_signal_pubkey.slice(0, 16)}...)`);
+    // Store/update peer session info for this specific nostr pubkey only
+    const peer = {
+        signalPubkey: hello.peer_signal_pubkey,
+        deviceId: hello.device_id,
+        name: hello.peer_name,
+        nostrPubkey: hello.peer_nostr_pubkey,
+        localSignalPubkey: hello.my_signal_key,
+    };
+    // Clean up only the legacy restore entry for THIS peer's signal pubkey (if it was keyed wrong)
+    if (getPeerSessions(accountId).has(hello.peer_signal_pubkey) && hello.peer_signal_pubkey !== hello.peer_nostr_pubkey) {
+        getPeerSessions(accountId).delete(hello.peer_signal_pubkey);
+        ctx.log?.info(`[${accountId}] Cleaned up legacy signal-keyed entry: ${hello.peer_signal_pubkey}`);
+    }
+    // Update getAddressToPeer entries that pointed to the old signal key to use nostr key
+    for (const [addr, oldPeerKey] of getAddressToPeer(accountId)) {
+        if (oldPeerKey === hello.peer_signal_pubkey) {
+            getAddressToPeer(accountId).set(addr, hello.peer_nostr_pubkey);
+        }
+    }
+    getPeerSessions(accountId).set(hello.peer_nostr_pubkey, peer);
+    // B-role: Protocol Step 2-3 — received hello, built X3DH session, sending accept-first.
+    // initiatedByUs stays false (default) since we are the responder.
+    friendRequestManager.setSessionEstablished(accountId, hello.peer_nostr_pubkey);
+    // NOTE: peer mapping already persisted by Rust handle_process_hello (with local Signal keys).
+    // Do NOT call savePeerMapping here — it would overwrite my_signal_key/privkey with NULL.
+    // Protocol Step 3: Receiver sends accept-first as kind:4 PreKey to initiator onetimekey.
+    if (isPairingPending) {
+        upsertKeychatPairingRequest(msg.from_pubkey, { name: hello.peer_name }, accountId);
+    }
+    const greetingText = isPairingPending
+        ? `👋 Hi! Your request has been sent to the owner for approval. Please wait.`
+        : `👋 Hi! I'm ${displayName}. We're connected now — feel free to chat!`;
+    const helloReplyMsg = JSON.stringify({
+        type: 100, // KeyChatEventKinds.dm — Keychat app displays type 100 as chat message (type 102 is silently dropped)
+        c: "signal",
+        msg: greetingText,
+    });
+    let sendResult;
+    try {
+        sendResult = await retrySend(() => bridge.sendMessage(hello.peer_nostr_pubkey, helloReplyMsg, {
+            isHelloReply: true,
+            senderName: displayName,
+        }));
+        ctx.log?.info(`[${accountId}] Sent hello reply to ${hello.peer_nostr_pubkey}`);
+    }
+    catch (e) {
+        ctx.log?.error(`[${accountId}] Failed to send hello reply to ${hello.peer_nostr_pubkey}: ${e}`);
+        // Continue — B still needs receiving addresses even if accept-first send fails
+    }
+    // Handle receiving address rotation after send (per-peer, addresses persisted to DB)
+    // Must run even if send failed so B is reachable for retries from A
+    if (sendResult) {
+        await handleReceivingAddressRotation(bridge, accountId, sendResult, hello.peer_nostr_pubkey);
+    }
+    // Send profile so peer knows our display name (after a short delay to avoid ratchet race with accept-first)
+    try {
+        await new Promise(resolve => setTimeout(resolve, 500));
+        await retrySend(() => bridge.sendProfile(hello.peer_nostr_pubkey, { name: displayName }));
+        ctx.log?.info(`[${accountId}] Sent profile to ${hello.peer_nostr_pubkey}`);
+    }
+    catch (e) {
+        ctx.log?.error(`[${accountId}] Failed to send profile to ${hello.peer_nostr_pubkey}: ${e}`);
+    }
+    // Notify owner about pending friend request
+    if (isPairingPending) {
+        const ownerPubkey = getOwnerPubkey(accountId, runtime);
+        if (ownerPubkey && ownerPubkey !== msg.from_pubkey) {
+            const peerPrefix = msg.from_pubkey.slice(0, 8);
+            const notifyText = `🔔 ${hello.peer_name || "Unknown"} (${peerPrefix}) wants to add your agent as a friend. Do you agree?`;
+            try {
+                await retrySend(() => bridge.sendMessage(ownerPubkey, notifyText));
+                ctx.log?.info(`[${accountId}] Notified owner ${ownerPubkey.slice(0, 12)} about friend request from ${msg.from_pubkey.slice(0, 12)}`);
+            }
+            catch (e) {
+                ctx.log?.error(`[${accountId}] Failed to notify owner about friend request: ${e}`);
+            }
+        }
+        else if (!ownerPubkey) {
+            ctx.log?.warn?.(`[${accountId}] No owner configured — cannot notify about pairing request from ${msg.from_pubkey.slice(0, 12)}`);
+        }
+    }
+    const initiatedByUs = friendRequestManager.isInitiatorSidePending(accountId, hello.peer_nostr_pubkey);
+    // Flush any pending messages that were waiting for this session.
+    if (initiatedByUs) {
+        ctx.log?.info(`[${accountId}] Flushing pending hello messages for ${hello.peer_nostr_pubkey}`);
+        await friendRequestManager.flushQueuedAfterSession(bridge, accountId, hello.peer_nostr_pubkey);
+    }
+    // Dispatch the peer's greeting through the agent pipeline so the AI can generate a proper welcome
+    // But skip dispatch if we initiated the hello (we already know who they are)
+    const weInitiated = initiatedByUs;
+    if (!weInitiated) {
+        const greetingText = `[New contact] ${hello.peer_name} connected via Keychat. Their greeting: ${hello.greeting || "(no message)"}`;
+        await dispatchToAgent(bridge, accountId, hello.peer_nostr_pubkey, hello.peer_name, greetingText, msg.event_id + "_hello", runtime, ctx);
+    }
+    else {
+        ctx.log?.info(`[${accountId}] Skipping dispatch for self-initiated hello to ${hello.peer_nostr_pubkey}`);
+    }
+}
+/** Handle a NIP-04 pre-decrypted message (e.g., group invite). */
+async function handleNip04Message(bridge, accountId, msg, ctx, runtime, cfg, accountName) {
+    const plaintext = msg.text || msg.encrypted_content;
+    ctx.log?.info(`[${accountId}] NIP-04 decrypted message from ${msg.from_pubkey?.slice(0, 16)}... (${plaintext.length} chars)`);
+    // Try to parse as KeychatMessage
+    let displayText = plaintext;
+    try {
+        const parsed = JSON.parse(plaintext);
+        // Handle group invite (type=11, c="group")
+        if (parsed && parsed.type === 11 && parsed.c === "group" && parsed.msg) {
+            const roomProfile = JSON.parse(parsed.msg);
+            let senderIdPubkey = msg.from_pubkey;
+            let inviteMessage = "Group invite received";
+            if (parsed.name) {
+                try {
+                    const nameData = JSON.parse(parsed.name);
+                    if (Array.isArray(nameData) && nameData.length >= 2) {
+                        inviteMessage = nameData[0];
+                        senderIdPubkey = nameData[1];
+                    }
+                }
+                catch { /* ignore */ }
+            }
+            ctx.log?.info(`[${accountId}] Received group invite via NIP-04 from ${senderIdPubkey.slice(0, 16)}...`);
+            const joinResult = await bridge.joinGroup(roomProfile, senderIdPubkey);
+            ctx.log?.info(`[${accountId}] Joined group ${joinResult.group_id} (${joinResult.member_count} members)`);
+            // Send hello to the group
+            try {
+                const groupDisplayName = resolveDisplayName(cfg, accountId, accountName);
+                const helloText = `😃 Hi, I am ${groupDisplayName}`;
+                const ghResult = await bridge.sendGroupMessage(joinResult.group_id, helloText);
+                if (ghResult.member_rotations?.length) {
+                    for (const rot of ghResult.member_rotations) {
+                        await handleReceivingAddressRotation(bridge, accountId, { my_new_inbox: rot.my_new_inbox }, rot.member);
+                    }
+                }
+                ctx.log?.info(`[${accountId}] Sent group hello to ${joinResult.group_id}`);
+            }
+            catch (err) {
+                ctx.log?.error(`[${accountId}] Failed to send group hello: ${err}`);
+            }
+            // Dispatch to agent
+            displayText = `[Group Invite] ${inviteMessage}. Joined group "${joinResult.name}" with ${joinResult.member_count} members.`;
+            const senderLabel = getPeerSessions(accountId).get(senderIdPubkey)?.name || senderIdPubkey.slice(0, 12);
+            await dispatchGroupToAgent(bridge, accountId, joinResult.group_id, senderIdPubkey, senderLabel, displayText, msg.event_id, runtime, ctx, { message: displayText, pubkey: joinResult.group_id });
+            return;
+        }
+        // Other NIP-04 messages — extract msg field if it's a KeychatMessage
+        if (parsed && typeof parsed.msg === "string") {
+            displayText = parsed.msg;
+        }
+    }
+    catch {
+        // Not JSON — use as-is
+    }
+    // Dispatch as regular DM from the sender
+    const senderPubkey = msg.from_pubkey;
+    const nip04Access = resolveDmAccess(accountId, senderPubkey, runtime);
+    if (nip04Access.decision === "block") {
+        ctx.log?.info(`[${accountId}] ⛔ Blocked NIP-04 message from ${senderPubkey} — dmPolicy`);
+        return;
+    }
+    if (nip04Access.decision === "pairing") {
+        ctx.log?.info(`[${accountId}] ⛔ NIP-04 message from ${senderPubkey} — pending pairing`);
+        // Can't easily send pairing reply via NIP-04 without bridge session, just block
+        return;
+    }
+    const peer = getPeerSessions(accountId).get(senderPubkey);
+    const senderLabel = peer?.name || senderPubkey.slice(0, 12);
+    await dispatchToAgent(bridge, accountId, senderPubkey, senderLabel, displayText, msg.event_id, runtime, ctx);
+}
+// ═══════════════════════════════════════════════════════════════════════════
+// MLS Group Message Handlers
+// ═══════════════════════════════════════════════════════════════════════════
+/** Handle an incoming MLS group message (kind:1059 on listen key, not Gift Wrap). */
+async function handleMlsGroupMessage(bridge, accountId, groupId, msg, ctx, runtime) {
+    try {
+        // Parse the message type first
+        const msgType = await bridge.mlsParseMessageType(groupId, msg.encrypted_content);
+        ctx.log?.info(`[${accountId}] MLS message type: ${msgType} for group ${groupId}`);
+        switch (msgType) {
+            case "Application": {
+                // Decrypt the application message
+                let decrypted;
+                try {
+                    decrypted = await bridge.mlsDecryptMessage(groupId, msg.encrypted_content);
+                }
+                catch (decryptErr) {
+                    // OpenMLS throws "Cannot decrypt own messages" for our own messages
+                    // (sender key is deleted after sending for forward secrecy).
+                    // This is expected — just skip silently.
+                    if (decryptErr?.message?.includes("Cannot decrypt own")) {
+                        return;
+                    }
+                    throw decryptErr;
+                }
+                ctx.log?.info(`[${accountId}] MLS message from ${decrypted.sender.slice(0, 12)} in group ${groupId}`);
+                // Skip messages from ourselves (fallback check)
+                const myPubkey = accountInfoCache.get(accountId)?.pubkey_hex;
+                if (decrypted.sender === myPubkey) {
+                    ctx.log?.info(`[${accountId}] Skipping own MLS message`);
+                    return;
+                }
+                // Get group info for context
+                let groupName = groupId.slice(0, 12);
+                try {
+                    const info = await bridge.mlsGetGroupInfo(groupId);
+                    groupName = info.name || groupName;
+                }
+                catch { /* best effort */ }
+                // Check if message is an encrypted media URL
+                let mlsDisplayText = decrypted.plaintext;
+                let mlsMediaPath;
+                const mlsMediaInfo = parseMediaUrl(decrypted.plaintext);
+                if (mlsMediaInfo) {
+                    try {
+                        mlsMediaPath = await downloadAndDecrypt(mlsMediaInfo);
+                        ctx.log?.info(`[${accountId}] MLS group media downloaded: ${mlsMediaInfo.kctype} → ${mlsMediaPath}`);
+                        if (mlsMediaInfo.isVoiceNote) {
+                            try {
+                                const sttConfig = { provider: "whisper-cpp", language: "auto" };
+                                const { transcribe } = await loadStt();
+                                const transcription = await transcribe(mlsMediaPath, sttConfig);
+                                ctx.log?.info(`[${accountId}] MLS voice note transcribed: ${transcription.slice(0, 80)}...`);
+                                mlsDisplayText = `[voice message, ${mlsMediaInfo.duration || '?'}s] ${transcription}`;
+                            }
+                            catch (sttErr) {
+                                ctx.log?.error(`[${accountId}] MLS voice note STT failed: ${sttErr}`);
+                                mlsDisplayText = `[voice message — transcription failed, audio saved to ${mlsMediaPath}]`;
+                            }
+                        }
+                        else {
+                            mlsDisplayText = `[${mlsMediaInfo.kctype}: ${mlsMediaInfo.sourceName || mlsMediaInfo.suffix}] (saved to ${mlsMediaPath})`;
+                        }
+                    }
+                    catch (err) {
+                        ctx.log?.error(`[${accountId}] MLS group media download failed: ${err}`);
+                        mlsDisplayText = `[${mlsMediaInfo.kctype} message — download failed]`;
+                    }
+                }
+                // Route to agent
+                ctx.log?.info(`[${accountId}] MLS dispatching to agent: group="${groupName}", sender=${decrypted.sender.slice(0, 12)}, textLen=${mlsDisplayText.length}`);
+                await dispatchMlsGroupToAgent(bridge, accountId, groupId, groupName, decrypted.sender, decrypted.sender.slice(0, 12), mlsDisplayText, msg.event_id, runtime, ctx, mlsMediaPath);
+                ctx.log?.info(`[${accountId}] MLS dispatch complete for group="${groupName}"`);
+                break;
+            }
+            case "Commit": {
+                // Process the commit (add/remove/update/etc.)
+                const commitResult = await bridge.mlsProcessCommit(groupId, msg.encrypted_content);
+                ctx.log?.info(`[${accountId}] MLS commit: ${commitResult.commit_type} by ${commitResult.sender.slice(0, 12)} in group ${groupId}`);
+                // Update listen key subscription
+                const oldListenKey = msg.arrived_at;
+                if (oldListenKey && oldListenKey !== commitResult.listen_key) {
+                    mlsListenKeyToGroup.delete(oldListenKey);
+                    getAddressToPeer(accountId).delete(oldListenKey);
+                    try {
+                        await bridge.deleteReceivingAddress(oldListenKey);
+                    }
+                    catch { /* */ }
+                    try {
+                        await bridge.removeSubscription([oldListenKey]);
+                    }
+                    catch { /* best effort */ }
+                }
+                mlsListenKeyToGroup.set(commitResult.listen_key, groupId);
+                await bridge.addSubscription([commitResult.listen_key]);
+                const mlsPeerKeyCommit = `mls:${groupId}`;
+                getAddressToPeer(accountId).set(commitResult.listen_key, mlsPeerKeyCommit);
+                try {
+                    await bridge.saveReceivingAddress(commitResult.listen_key, mlsPeerKeyCommit);
+                }
+                catch { /* */ }
+                // Generate system message based on commit type
+                let systemMsg = "";
+                switch (commitResult.commit_type) {
+                    case "Add":
+                        systemMsg = `[System] ${commitResult.sender.slice(0, 12)} added [${commitResult.operated_members.map(m => m.slice(0, 12)).join(", ")}] to the group`;
+                        break;
+                    case "Remove": {
+                        const myPubkey = accountInfoCache.get(accountId)?.pubkey_hex;
+                        if (commitResult.operated_members.includes(myPubkey ?? "")) {
+                            systemMsg = "[System] You have been removed from the group";
+                        }
+                        else {
+                            systemMsg = `[System] ${commitResult.sender.slice(0, 12)} removed [${commitResult.operated_members.map(m => m.slice(0, 12)).join(", ")}]`;
+                        }
+                        break;
+                    }
+                    case "Update":
+                        systemMsg = `[System] ${commitResult.sender.slice(0, 12)} updated their key`;
+                        break;
+                    case "GroupContextExtensions": {
+                        // Refresh group info
+                        try {
+                            const info = await bridge.mlsGetGroupInfo(groupId);
+                            systemMsg = `[System] ${commitResult.sender.slice(0, 12)} updated group info: ${info.name}`;
+                            if (info.status === "dissolved") {
+                                systemMsg = "[System] The admin closed this group chat";
+                            }
+                        }
+                        catch {
+                            systemMsg = `[System] ${commitResult.sender.slice(0, 12)} updated group info`;
+                        }
+                        break;
+                    }
+                }
+                if (systemMsg) {
+                    ctx.log?.info(`[${accountId}] MLS system: ${systemMsg}`);
+                }
+                break;
+            }
+            case "Proposal":
+                ctx.log?.info(`[${accountId}] MLS proposal received in group ${groupId} (not processed)`);
+                break;
+            default:
+                ctx.log?.info(`[${accountId}] Unhandled MLS message type: ${msgType} in group ${groupId}`);
+        }
+    }
+    catch (err) {
+        ctx.log?.error(`[${accountId}] Failed to handle MLS group message: ${err}`);
+    }
+}
+/** Handle an MLS Welcome message (inner kind:444 from Gift Wrap). */
+async function handleMlsWelcome(bridge, accountId, msg, ctx, runtime, cfg, accountName) {
+    try {
+        const welcomeContent = msg.text || msg.encrypted_content;
+        if (!welcomeContent) {
+            ctx.log?.error(`[${accountId}] MLS Welcome: no content`);
+            return;
+        }
+        // Extract group_id from inner rumor's p-tags
+        // The Keychat app sends Welcome (kind:444) with additionalTags: [[p, groupPubkey]]
+        const innerPTags = msg.inner_tags_p;
+        const groupId = innerPTags?.[0];
+        if (!groupId) {
+            ctx.log?.error(`[${accountId}] MLS Welcome from ${msg.from_pubkey.slice(0, 12)}: no group_id in inner p-tags`);
+            return;
+        }
+        ctx.log?.info(`[${accountId}] MLS Welcome from ${msg.from_pubkey.slice(0, 12)} for group ${groupId.slice(0, 12)}...`);
+        // Join the group
+        const joinResult = await bridge.mlsJoinGroup(groupId, welcomeContent);
+        ctx.log?.info(`[${accountId}] Joined MLS group ${groupId.slice(0, 12)}, listen key: ${joinResult.listen_key.slice(0, 12)}...`);
+        // Subscribe to the group's listen key
+        mlsListenKeyToGroup.set(joinResult.listen_key, groupId);
+        await bridge.addSubscription([joinResult.listen_key]);
+        const mlsPeerKeyJoin = `mls:${groupId}`;
+        getAddressToPeer(accountId).set(joinResult.listen_key, mlsPeerKeyJoin);
+        try {
+            await bridge.saveReceivingAddress(joinResult.listen_key, mlsPeerKeyJoin);
+        }
+        catch { /* */ }
+        // Get group info
+        const info = await bridge.mlsGetGroupInfo(groupId);
+        ctx.log?.info(`[${accountId}] MLS group ${groupId}: ${info.members.length} members`);
+        // Send greeting: self_update produces a commit that must be published + committed
+        try {
+            const displayName = resolveDisplayName(cfg, accountId, accountName);
+            const greetingResult = await bridge.mlsSelfUpdate(groupId, {
+                name: displayName,
+                msg: `[System] Hello everyone! I am ${displayName}`,
+                status: "invited",
+            });
+            // Publish the commit to the group's listen key
+            await bridge.mlsPublishToGroup(joinResult.listen_key, greetingResult.encrypted_msg);
+            ctx.log?.info(`[${accountId}] Published MLS greeting commit to group ${groupId}`);
+            // Merge pending commit
+            await bridge.mlsSelfCommit(groupId);
+            // Listen key changes after commit — re-subscribe
+            const { listen_key: newKey } = await bridge.mlsGetListenKey(groupId);
+            if (newKey !== joinResult.listen_key) {
+                mlsListenKeyToGroup.delete(joinResult.listen_key);
+                getAddressToPeer(accountId).delete(joinResult.listen_key);
+                try {
+                    await bridge.deleteReceivingAddress(joinResult.listen_key);
+                }
+                catch { /* */ }
+                mlsListenKeyToGroup.set(newKey, groupId);
+                await bridge.removeSubscription([joinResult.listen_key]);
+                await bridge.addSubscription([newKey]);
+                getAddressToPeer(accountId).set(newKey, `mls:${groupId}`);
+                try {
+                    await bridge.saveReceivingAddress(newKey, `mls:${groupId}`);
+                }
+                catch { /* */ }
+                ctx.log?.info(`[${accountId}] MLS listen key rotated after greeting: ${newKey.slice(0, 12)}...`);
+            }
+        }
+        catch (err) {
+            ctx.log?.error(`[${accountId}] Failed to send MLS greeting: ${err}`);
+        }
+        // Re-publish KeyPackage since the old one was consumed
+        try {
+            const kpResult = await bridge.mlsPublishKeyPackage();
+            ctx.log?.info(`[${accountId}] Re-published MLS KeyPackage after join (event ${kpResult.event_id})`);
+        }
+        catch (err) {
+            ctx.log?.error(`[${accountId}] Failed to re-publish KeyPackage after join: ${err}`);
+        }
+    }
+    catch (err) {
+        ctx.log?.error(`[${accountId}] Failed to handle MLS Welcome: ${err}`);
+    }
+}
+/** Dispatch an MLS group message to the agent. */
+async function dispatchMlsGroupToAgent(bridge, accountId, groupId, groupName, senderPubkey, senderName, displayText, eventId, runtime, ctx, mediaPath) {
+    const core = runtime;
+    const cfg = core.config.loadConfig();
+    ctx.log?.info(`[${accountId}] dispatchMlsGroupToAgent: resolving route for group=${groupId.slice(0, 12)}`);
+    const route = core.channel.routing.resolveAgentRoute({
+        cfg,
+        channel: "keychat",
+        accountId,
+        peer: {
+            kind: "group",
+            id: groupId,
+        },
+    });
+    ctx.log?.info(`[${accountId}] dispatchMlsGroupToAgent: route resolved, sessionKey=${route.sessionKey}`);
+    const body = core.channel.reply.formatAgentEnvelope({
+        channel: "Keychat",
+        from: senderName,
+        timestamp: Date.now(),
+        body: displayText,
+    });
+    const ctxPayload = core.channel.reply.finalizeInboundContext({
+        Body: body,
+        RawBody: displayText,
+        CommandBody: displayText,
+        CommandAuthorized: true,
+        From: `keychat:${senderPubkey}`,
+        To: `keychat:mls-group:${groupId}`,
+        SessionKey: route.sessionKey,
+        AccountId: accountId,
+        ChatType: "group",
+        SenderName: senderName,
+        SenderId: senderPubkey,
+        GroupId: groupId,
+        GroupName: groupName,
+        Provider: "keychat",
+        Surface: "keychat",
+        MessageSid: eventId,
+        OriginatingChannel: "keychat",
+        OriginatingTo: `keychat:mls-group:${groupId}`,
+        ...(mediaPath ? { MediaPath: mediaPath } : {}),
+    });
+    const tableMode = core.channel.text.resolveMarkdownTableMode({
+        cfg,
+        channel: "keychat",
+        accountId,
+    });
+    const { onModelSelected, ...prefixOptions } = createReplyPrefixOptions({
+        cfg,
+        agentId: route.agentId,
+        channel: "keychat",
+        accountId,
+    });
+    // Buffer and merge deliver() calls
+    let deliverBuffer = [];
+    let deliverTimer = null;
+    const DELIVER_DEBOUNCE_MS = 1500;
+    const flushDeliverBuffer = async () => {
+        deliverTimer = null;
+        if (deliverBuffer.length === 0)
+            return;
+        const merged = deliverBuffer.join("\n\n").trim();
+        deliverBuffer = [];
+        if (!merged)
+            return;
+        try {
+            await retrySend(() => bridge.mlsSendMessage(groupId, merged));
+        }
+        catch (err) {
+            ctx.log?.error(`[${accountId}] MLS group reply delivery failed: ${err}`);
+        }
+    };
+    await core.channel.reply.dispatchReplyWithBufferedBlockDispatcher({
+        ctx: ctxPayload,
+        cfg,
+        dispatcherOptions: {
+            ...prefixOptions,
+            deliver: async (payload) => {
+                if (!payload.text)
+                    return;
+                const message = stripReasoningPrefix(core.channel.text.convertMarkdownTables(payload.text, tableMode));
+                deliverBuffer.push(message);
+                if (deliverTimer)
+                    clearTimeout(deliverTimer);
+                deliverTimer = setTimeout(() => { flushDeliverBuffer(); }, DELIVER_DEBOUNCE_MS);
+            },
+            onError: (err) => {
+                ctx.log?.error(`[${accountId}] MLS group reply delivery failed: ${err}`);
+            },
+        },
+        replyOptions: {
+            onModelSelected,
+        },
+    });
+    // Flush remaining
+    if (deliverTimer)
+        clearTimeout(deliverTimer);
+    await flushDeliverBuffer();
+}
+/** Handle a kind:4 DM (Signal-encrypted message). */
+async function handleEncryptedDM(bridge, accountId, msg, ctx, runtime) {
+    // kind:4 is published from an ephemeral event key, so from_pubkey is not a stable peer identifier.
+    // arrived_at is authoritative because it is our subscribed receiving address used for routing.
+    // Resolve by arrived_at first from in-memory map, then DB mapping cache.
+    let peerNostrPubkey = null;
+    if (msg.arrived_at) {
+        peerNostrPubkey = getAddressToPeer(accountId).get(msg.arrived_at) ?? null;
+        if (!peerNostrPubkey) {
+            try {
+                const { mappings: dbMappings } = await bridge.getReceivingAddresses();
+                const found = dbMappings.find((m) => m.address === msg.arrived_at);
+                if (found) {
+                    peerNostrPubkey = found.peer_nostr_pubkey;
+                    getAddressToPeer(accountId).set(msg.arrived_at, peerNostrPubkey);
+                    ctx.log?.info(`[${accountId}] Resolved peer from DB address mapping: ${peerNostrPubkey}`);
+                }
+            }
+            catch { /* best effort */ }
+        }
+    }
+    // Protocol Step 3: accept-first arrives on A_onetimekey as a kind:4 PreKey message.
+    // Only this path can establish a new session before normal routing metadata exists.
+    const hasPeerSession = peerNostrPubkey ? getPeerSessions(accountId).has(peerNostrPubkey) : false;
+    ctx.log?.info(`[${accountId}] DEBUG: peerNostrPubkey=${peerNostrPubkey}, hasPeerSession=${hasPeerSession}, is_prekey=${msg.is_prekey}, arrived_at=${msg.arrived_at}`);
+    if ((!peerNostrPubkey || !hasPeerSession) && msg.is_prekey) {
+        try {
+            const prekeyInfo = await bridge.parsePrekeySender(msg.encrypted_content);
+            ctx.log?.info(`[${accountId}] parsePrekeySender result: is_prekey=${prekeyInfo.is_prekey}, signal_identity_key=${prekeyInfo.signal_identity_key}`);
+            if (prekeyInfo.is_prekey && prekeyInfo.signal_identity_key) {
+                const sigKey = prekeyInfo.signal_identity_key;
+                // Identify the sender deterministically for accept-first:
+                // 1) signed_pre_key_id mapping (preferred), 2) arrived_at/onetimekey mapping.
+                if (!peerNostrPubkey || !getPeerSessions(accountId).has(peerNostrPubkey)) {
+                    let senderNostrId = null;
+                    let senderName = sigKey.slice(0, 12);
+                    let localSignalPubkey;
+                    if (prekeyInfo.signed_pre_key_id != null) {
+                        try {
+                            const lookup = await bridge.lookupPeerBySignedPrekeyId(prekeyInfo.signed_pre_key_id);
+                            if (lookup.nostr_pubkey) {
+                                senderNostrId = lookup.nostr_pubkey;
+                                ctx.log?.info(`[${accountId}] PreKey sender identified via signed_prekey_id=${prekeyInfo.signed_pre_key_id} → ${senderNostrId}`);
+                            }
+                            if (lookup.my_signal_key) {
+                                localSignalPubkey = lookup.my_signal_key;
+                            }
+                        }
+                        catch (e) {
+                            ctx.log?.error(`[${accountId}] lookupPeerBySignedPrekeyId failed: ${e}`);
+                        }
+                    }
+                    // Fallback to onetimekey routing mapping from Protocol Step 1 hello.
+                    if (!senderNostrId && peerNostrPubkey) {
+                        senderNostrId = peerNostrPubkey;
+                        ctx.log?.info(`[${accountId}] PreKey sender identified via onetimekey addressToPeer mapping: ${senderNostrId}`);
+                    }
+                    if (!senderNostrId) {
+                        ctx.log?.error(`[${accountId}] ⚠️ PreKey from unknown signal key ${sigKey} — signed_prekey_id lookup and onetimekey mapping both failed. Dropping.`);
+                        return;
+                    }
+                    // Protocol Step 4: Reproduce X3DH and decrypt accept-first PreKey payload.
+                    const decryptResult = await bridge.decryptMessage(sigKey, msg.encrypted_content, true, localSignalPubkey, senderNostrId ?? undefined);
+                    const { plaintext } = decryptResult;
+                    // Try to extract name from PrekeyMessageModel if available
+                    try {
+                        const parsed = JSON.parse(plaintext);
+                        if (parsed?.name)
+                            senderName = parsed.name;
+                    }
+                    catch { /* not JSON */ }
+                    // Register the peer session
+                    const newPeer = {
+                        signalPubkey: sigKey,
+                        deviceId: 1,
+                        name: senderName,
+                        nostrPubkey: senderNostrId,
+                        localSignalPubkey,
+                    };
+                    getPeerSessions(accountId).set(senderNostrId, newPeer);
+                    // Update DB with remote peer_signal_key so Rust send_message can find it.
+                    // savePeerMapping uses INSERT OR REPLACE — we must pass the signal key.
+                    // my_signal_key/privkey are cleared separately by clearPrekeyMaterial below.
+                    try {
+                        await bridge.savePeerMapping(senderNostrId, sigKey, 1, senderName);
+                    }
+                    catch (e) {
+                        ctx.log?.error(`[${accountId}] savePeerMapping after PreKey failed: ${e}`);
+                    }
+                    ctx.log?.info(`[${accountId}] ✅ Session established with peer ${senderNostrId.slice(0, 16)}... (signal: ${sigKey.slice(0, 16)}...)`);
+                    // A-role: Protocol Step 4 — received accept-first, reproduced X3DH, session established.
+                    // initiatedByUs was already set to true when we sent the hello (ensureOutgoingHelloAndHandshakeSubscriptions).
+                    friendRequestManager.setSessionEstablished(accountId, senderNostrId);
+                    // Step 4: next_send_addrs from decrypt are the peer's receiving addresses (our sending destination).
+                    // Rust bridge now handles persisting these as peer_inbox. No TS action needed.
+                    // Clear sensitive PreKey material after address rotation is complete
+                    try {
+                        await bridge.clearPrekeyMaterial(senderNostrId);
+                    }
+                    catch { /* best effort */ }
+                    const initiatedByUs = friendRequestManager.isInitiatorSidePending(accountId, senderNostrId);
+                    if (initiatedByUs) {
+                        try {
+                            await friendRequestManager.flushQueuedAfterSession(bridge, accountId, senderNostrId);
+                        }
+                        catch (e) {
+                            ctx.log?.error(`[${accountId}] flushQueuedAfterSession failed: ${e}`);
+                        }
+                    }
+                    // Parse and dispatch the decrypted content
+                    let displayText = plaintext;
+                    try {
+                        const parsed = JSON.parse(plaintext);
+                        // PrekeyMessageModel uses 'message' field; KeychatMessage uses 'msg'
+                        if (parsed && typeof parsed.message === "string") {
+                            displayText = parsed.message;
+                            // The message field may contain a nested KeychatMessage JSON
+                            try {
+                                const inner = JSON.parse(parsed.message);
+                                if (inner && typeof inner.msg === "string") {
+                                    displayText = inner.msg;
+                                }
+                            }
+                            catch { /* not nested JSON */ }
+                        }
+                        else if (parsed && typeof parsed.msg === "string") {
+                            displayText = parsed.msg;
+                        }
+                        // If this is a PrekeyMessageModel (hello reply wrapper), extract the welcome message
+                        if (parsed?.nostrId && typeof parsed.nostrId === "string"
+                            && parsed?.signalId && typeof parsed.signalId === "string"
+                            && typeof parsed.time === "number") {
+                            // Verify Schnorr signature (globalSign) if present
+                            if (parsed.sig && typeof parsed.sig === "string") {
+                                try {
+                                    const signMessage = `Keychat-${parsed.nostrId}-${parsed.signalId}-${parsed.time}`;
+                                    const valid = await bridge.verifySchnorr(parsed.nostrId, signMessage, parsed.sig);
+                                    if (!valid) {
+                                        ctx.log?.error(`[${accountId}] ⚠️ PrekeyMessageModel Schnorr signature verification FAILED for ${senderNostrId.slice(0, 16)}`);
+                                        return; // Drop message with invalid signature
+                                    }
+                                }
+                                catch (e) {
+                                    ctx.log?.error(`[${accountId}] Schnorr verify error: ${e}`);
+                                    // Continue — don't block on verification failure (best effort)
+                                }
+                            }
+                            ctx.log?.info(`[${accountId}] Hello reply from ${senderNostrId.slice(0, 16)}... (${displayText.length} chars)`);
+                            // Only skip if there is no actual message content to display
+                            if (!displayText || displayText === plaintext) {
+                                return; // Truly empty or unparseable hello reply — skip
+                            }
+                            // Otherwise fall through to dispatch the welcome message
+                        }
+                    }
+                    catch { /* not JSON — dispatch as regular message */ }
+                    // DM Policy gate
+                    const prekeyAccess = resolveDmAccess(accountId, senderNostrId, runtime);
+                    if (prekeyAccess.decision === "block") {
+                        ctx.log?.info(`[${accountId}] ⛔ Blocked PreKey message from ${senderNostrId} — dmPolicy`);
+                        return;
+                    }
+                    if (prekeyAccess.decision === "pairing") {
+                        ctx.log?.info(`[${accountId}] ⛔ PreKey message from ${senderNostrId} — pending pairing`);
+                        const { code, created } = upsertKeychatPairingRequest(senderNostrId, { name: senderName }, accountId);
+                        if (created && code) {
+                            try {
+                                const pairingResult = await retrySend(() => bridge.sendMessage(senderNostrId, buildKeychatPairingReply(code, senderNostrId)));
+                                await handleReceivingAddressRotation(bridge, accountId, pairingResult, senderNostrId);
+                            }
+                            catch { /* best effort */ }
+                        }
+                        return;
+                    }
+                    // Dispatch non-hello PreKey messages to agent
+                    await dispatchToAgent(bridge, accountId, senderNostrId, senderName, displayText, msg.event_id, runtime, ctx);
+                    return;
+                }
+            }
+        }
+        catch (err) {
+            ctx.log?.error(`[${accountId}] PreKey parse/decrypt FAILED: ${err}`);
+            console.error(`[keychat] PreKey error:`, err);
+        }
+    }
+    // No brute-force fallback — if we can't identify the peer, drop the message.
+    // Guessing would risk sending replies to the wrong person (privacy leak).
+    if (!peerNostrPubkey) {
+        ctx.log?.error(`[${accountId}] Cannot identify peer for inbound kind:4 (arrived_at=${msg.arrived_at}, from=${msg.from_pubkey})`);
+        return;
+    }
+    const peer = getPeerSessions(accountId).get(peerNostrPubkey);
+    if (!peer) {
+        ctx.log?.error(`[${accountId}] No session info for peer ${peerNostrPubkey}`);
+        return;
+    }
+    // Decrypt using peer's Signal (curve25519) pubkey
+    ctx.log?.info(`[${accountId}] Routing decrypt to peer ${peerNostrPubkey} (signal: ${peer.signalPubkey})`);
+    let decryptResult;
+    // peer is now guaranteed correct (no fallback to other peers)
+    try {
+        decryptResult = await bridge.decryptMessage(peer.signalPubkey, msg.encrypted_content, msg.is_prekey, peer.localSignalPubkey, peerNostrPubkey);
+    }
+    catch (err) {
+        // Do NOT try other peers — Signal decrypt consumes message keys (irreversible).
+        // Attempting decrypt with wrong peer would corrupt their ratchet state.
+        ctx.log?.error(`[${accountId}] ⚠️ Decrypt failed for peer ${peerNostrPubkey} (signal: ${peer.signalPubkey}), event_id=${msg.event_id}: ${err}. Dropping message. Peer may need to reset Signal session.`);
+        return;
+    }
+    const { plaintext } = decryptResult;
+    // State transitions are constrained to:
+    // - Protocol Step 4: setSessionEstablished in accept-first handlers.
+    // - Protocol Step 5/6: set NORMAL_CHAT only when flushing first queued post-handshake send.
+    // Step 5+: next_send_addrs from decrypt are the peer's receiving addresses (our sending destination).
+    // Rust bridge now handles persisting these as peer_inbox. No TS action needed.
+    // Lazy cleanup: now that we received a message on msg.arrived_at, remove older
+    // addresses for this peer (keep REMAIN_RECEIVE_KEYS_PER_PEER most recent).
+    // This matches Keychat app's deleteReceiveKey behavior — only clean up when we
+    // have proof the peer is using a newer address.
+    if (peerNostrPubkey && msg.arrived_at) {
+        try {
+            const peerAddrs = getPeerSubscribedAddresses(accountId).get(peerNostrPubkey) ?? [];
+            const idx = peerAddrs.indexOf(msg.arrived_at);
+            if (idx >= 0 && peerAddrs.length > REMAIN_RECEIVE_KEYS_PER_PEER) {
+                // Keep addresses from (idx - REMAIN_RECEIVE_KEYS_PER_PEER + 1) onward
+                const keepFrom = Math.max(0, idx - REMAIN_RECEIVE_KEYS_PER_PEER + 1);
+                if (keepFrom > 0) {
+                    const staleAddrs = peerAddrs.slice(0, keepFrom);
+                    const remaining = peerAddrs.slice(keepFrom);
+                    getPeerSubscribedAddresses(accountId).set(peerNostrPubkey, remaining);
+                    for (const old of staleAddrs) {
+                        getAddressToPeer(accountId).delete(old);
+                        try {
+                            await bridge.removeSubscription([old]);
+                        }
+                        catch { /* */ }
+                        try {
+                            await bridge.deleteReceivingAddress(old);
+                        }
+                        catch { /* */ }
+                    }
+                    if (staleAddrs.length > 0) {
+                        ctx.log?.info(`[${accountId}] Lazy cleanup: removed ${staleAddrs.length} old address(es) for peer ${peerNostrPubkey.slice(0, 16)}, kept ${remaining.length}`);
+                    }
+                }
+            }
+        }
+        catch (err) {
+            ctx.log?.error(`[${accountId}] Lazy address cleanup failed: ${err}`);
+        }
+    }
+    // The decrypted content may be a KeychatMessage JSON — extract the `msg` field
+    // and optionally the `name` field (MsgReply for quoted messages)
+    let displayText = plaintext;
+    let groupContext = null;
+    ctx.log?.debug(`[${accountId}] Decrypted message (${plaintext.length} chars)`);
+    try {
+        const parsed = JSON.parse(plaintext);
+        if (parsed && typeof parsed.msg === "string") {
+            // Check if this is a group message (type=30, c="group")
+            if (parsed.type === 30 && parsed.c === "group") {
+                try {
+                    const gm = JSON.parse(parsed.msg);
+                    if (gm && typeof gm.message === "string" && typeof gm.pubkey === "string") {
+                        groupContext = { groupId: gm.pubkey, groupMessage: gm };
+                        displayText = gm.message;
+                        // Handle group system messages
+                        const isSystemMsg = [14, 15, 16, 17, 20, 32].includes(gm.subtype);
+                        if (isSystemMsg) {
+                            displayText = `[System] ${gm.message}`;
+                            // Update DB state for destructive group events
+                            if (gm.subtype === 17) {
+                                // groupDissolve — mark group as disabled
+                                try {
+                                    await bridge.updateGroupStatus(gm.pubkey, "disabled");
+                                    ctx.log?.info(`[${accountId}] Group ${gm.pubkey} dissolved, marked disabled`);
+                                }
+                                catch (err) {
+                                    ctx.log?.error(`[${accountId}] Failed to disable dissolved group: ${err}`);
+                                }
+                            }
+                            else if (gm.subtype === 16) {
+                                // groupSelfLeave — remove the member who left
+                                try {
+                                    await bridge.removeGroupMember(gm.pubkey, peerNostrPubkey);
+                                    ctx.log?.info(`[${accountId}] Removed ${peerNostrPubkey} from group ${gm.pubkey} (self-leave)`);
+                                }
+                                catch (err) {
+                                    ctx.log?.error(`[${accountId}] Failed to remove left member: ${err}`);
+                                }
+                            }
+                            else if (gm.subtype === 32 && gm.ext) {
+                                // groupRemoveSingleMember — ext contains the removed member's id_pubkey
+                                try {
+                                    await bridge.removeGroupMember(gm.pubkey, gm.ext);
+                                    ctx.log?.info(`[${accountId}] Removed ${gm.ext} from group ${gm.pubkey} (kicked)`);
+                                }
+                                catch (err) {
+                                    ctx.log?.error(`[${accountId}] Failed to remove kicked member: ${err}`);
+                                }
+                            }
+                            else if (gm.subtype === 20 && gm.ext) {
+                                // groupChangeRoomName — ext contains the new name
+                                try {
+                                    await bridge.updateGroupName(gm.pubkey, gm.ext);
+                                    ctx.log?.info(`[${accountId}] Group ${gm.pubkey} renamed to "${gm.ext}"`);
+                                }
+                                catch (err) {
+                                    ctx.log?.error(`[${accountId}] Failed to update group name: ${err}`);
+                                }
+                            }
+                        }
+                    }
+                }
+                catch {
+                    displayText = parsed.msg;
+                }
+            }
+            else {
+                displayText = parsed.msg;
+                // Check for quoted/reply message in `name` field (MsgReply JSON)
+                // Format: { id?: string, user: string, content: string }
+                if (parsed.name && parsed.type === 100) {
+                    try {
+                        const reply = JSON.parse(parsed.name);
+                        if (reply && typeof reply.content === "string") {
+                            const quotedUser = reply.user || "unknown";
+                            displayText = `[Replying to ${quotedUser}: "${reply.content}"]\n${parsed.msg}`;
+                        }
+                    }
+                    catch {
+                        // name is not MsgReply JSON (could be other data), ignore
+                    }
+                }
+            }
+        }
+    }
+    catch {
+        // Not JSON — use plaintext as-is
+    }
+    // Handle group invite messages (type=11, c="group")
+    if (!groupContext) {
+        try {
+            const parsed = JSON.parse(plaintext);
+            if (parsed && parsed.type === 11 && parsed.c === "group" && parsed.msg) {
+                const roomProfile = JSON.parse(parsed.msg);
+                // Extract sender info from parsed.name: JSON array [realMessage, senderIdPubkey]
+                let senderIdPubkey = peerNostrPubkey;
+                let inviteMessage = "Group invite received";
+                if (parsed.name) {
+                    try {
+                        const nameData = JSON.parse(parsed.name);
+                        if (Array.isArray(nameData) && nameData.length >= 2) {
+                            inviteMessage = nameData[0];
+                            senderIdPubkey = nameData[1];
+                        }
+                    }
+                    catch { /* ignore */ }
+                }
+                // Join the group via bridge
+                ctx.log?.info(`[${accountId}] Received group invite from ${senderIdPubkey.slice(0, 16)}...`);
+                const joinResult = await bridge.joinGroup(roomProfile, senderIdPubkey);
+                ctx.log?.info(`[${accountId}] Joined group ${joinResult.group_id} (${joinResult.member_count} members)`);
+                // Send hello to the group
+                const groupDisplayName2 = resolveDisplayName(cfg, accountId, accountName);
+                const helloText = `😃 Hi, I am ${groupDisplayName2}`;
+                try {
+                    const ghResult2 = await bridge.sendGroupMessage(joinResult.group_id, helloText);
+                    if (ghResult2.member_rotations?.length) {
+                        for (const rot of ghResult2.member_rotations) {
+                            await handleReceivingAddressRotation(bridge, accountId, { my_new_inbox: rot.my_new_inbox }, rot.member);
+                        }
+                    }
+                }
+                catch (err) {
+                    ctx.log?.error(`[${accountId}] Failed to send group hello: ${err}`);
+                }
+                // Dispatch invite notification to agent
+                displayText = `[Group Invite] ${inviteMessage}. Joined group "${joinResult.name}" with ${joinResult.member_count} members.`;
+                // Route as group message
+                groupContext = { groupId: joinResult.group_id, groupMessage: { message: displayText, pubkey: joinResult.group_id } };
+            }
+        }
+        catch {
+            // Not a group invite, continue normal processing
+        }
+    }
+    // Check if message is an encrypted media URL
+    let mediaPath;
+    const mediaInfo = parseMediaUrl(displayText);
+    if (mediaInfo) {
+        try {
+            const localPath = await downloadAndDecrypt(mediaInfo);
+            mediaPath = localPath;
+            ctx.log?.info(`[${accountId}] Downloaded ${mediaInfo.kctype}: ${localPath}`);
+            // Voice note: transcribe to text via STT
+            if (mediaInfo.isVoiceNote) {
+                try {
+                    const sttConfig = {
+                        provider: "whisper-cpp",
+                        language: "auto",
+                    };
+                    const { transcribe } = await loadStt();
+                    const transcription = await transcribe(localPath, sttConfig);
+                    ctx.log?.info(`[${accountId}] Voice note transcribed (${mediaInfo.duration || '?'}s): ${transcription.slice(0, 80)}...`);
+                    displayText = `[voice message, ${mediaInfo.duration || '?'}s] ${transcription}`;
+                }
+                catch (sttErr) {
+                    ctx.log?.error(`[${accountId}] Voice note STT failed: ${sttErr}`);
+                    displayText = `[voice message, ${mediaInfo.duration || '?'}s — transcription failed, audio saved to ${localPath}]`;
+                }
+            }
+            else {
+                displayText = `[${mediaInfo.kctype}: ${mediaInfo.sourceName || mediaInfo.suffix}] (saved to ${localPath})`;
+            }
+        }
+        catch (err) {
+            ctx.log?.error(`[${accountId}] Failed to download media: ${err}`);
+            displayText = `[${mediaInfo.kctype} message — download failed]`;
+        }
+    }
+    ctx.log?.info(`[${accountId}] Decrypted message from peer ${peerNostrPubkey} (${displayText.length} chars)`);
+    // Forward to OpenClaw's message pipeline via shared dispatch helper
+    const senderLabel = peer.name || peerNostrPubkey.slice(0, 12);
+    if (groupContext) {
+        // Route group messages to a group-specific dispatch
+        ctx.log?.info(`[${accountId}] Detected group message: groupId=${groupContext.groupId}, subtype=${groupContext.groupMessage.subtype}, sender=${peerNostrPubkey}`);
+        await dispatchGroupToAgent(bridge, accountId, groupContext.groupId, peerNostrPubkey, senderLabel, displayText, msg.event_id, runtime, ctx, groupContext.groupMessage, mediaPath);
+    }
+    else {
+        // DM Policy gate
+        const dmAccess = resolveDmAccess(accountId, peerNostrPubkey, runtime);
+        if (dmAccess.decision === "block") {
+            ctx.log?.info(`[${accountId}] ⛔ Blocked DM from ${peerNostrPubkey} — dmPolicy`);
+            return;
+        }
+        if (dmAccess.decision === "pairing") {
+            ctx.log?.info(`[${accountId}] ⛔ DM from ${peerNostrPubkey} — pending pairing`);
+            return;
+        }
+        // Check if this is the owner approving/rejecting a friend request
+        const ownerPk = getOwnerPubkey(accountId, runtime);
+        ctx.log?.info(`[${accountId}] Approval check: ownerPk=${ownerPk?.slice(0, 16)}, sender=${peerNostrPubkey.slice(0, 16)}, match=${ownerPk === peerNostrPubkey}`);
+        if (ownerPk && peerNostrPubkey === ownerPk) {
+            const approveMatch = displayText.match(/^(同意|approve|好)\s*(.*)/i);
+            const rejectMatch = displayText.match(/^(拒绝|reject|不)\s*(.*)/i);
+            if (approveMatch || rejectMatch) {
+                const isApprove = !!approveMatch;
+                const nameHint = (approveMatch?.[2] || rejectMatch?.[2] || "").trim();
+                const pending = listKeychatPairingRequests(accountId);
+                ctx.log?.info(`[${accountId}] Approval: isApprove=${isApprove}, nameHint="${nameHint}", pending=${JSON.stringify(pending)}`);
+                // Find matching request by name or pubkey prefix
+                let matched = null;
+                if (pending.length === 1 && !nameHint) {
+                    matched = pending[0];
+                }
+                else {
+                    for (const p of pending) {
+                        if (nameHint && p.name && p.name.toLowerCase().includes(nameHint.toLowerCase())) {
+                            matched = p;
+                            break;
+                        }
+                        if (nameHint && p.pubkey.startsWith(nameHint)) {
+                            matched = p;
+                            break;
+                        }
+                    }
+                }
+                if (matched) {
+                    if (isApprove) {
+                        appendKeychatAllowFromStore(matched.pubkey, accountId);
+                        removePairingRequest(matched.pubkey, accountId);
+                        // Notify the approved peer
+                        try {
+                            await retrySend(() => bridge.sendMessage(matched.pubkey, `✅ Your request has been approved! Feel free to chat.`));
+                        }
+                        catch { /* best effort */ }
+                        // Confirm to owner
+                        try {
+                            await retrySend(() => bridge.sendMessage(ownerPk, `✅ Approved ${matched.name || matched.pubkey.slice(0, 8)}.`));
+                        }
+                        catch { /* best effort */ }
+                        ctx.log?.info(`[${accountId}] Owner approved friend request from ${matched.pubkey.slice(0, 12)}`);
+                    }
+                    else {
+                        removePairingRequest(matched.pubkey, accountId);
+                        try {
+                            await retrySend(() => bridge.sendMessage(matched.pubkey, `❌ Your request has been rejected.`));
+                        }
+                        catch { /* best effort */ }
+                        try {
+                            await retrySend(() => bridge.sendMessage(ownerPk, `❌ Rejected ${matched.name || matched.pubkey.slice(0, 8)}.`));
+                        }
+                        catch { /* best effort */ }
+                        ctx.log?.info(`[${accountId}] Owner rejected friend request from ${matched.pubkey.slice(0, 12)}`);
+                    }
+                    return;
+                }
+            }
+        }
+        ctx.log?.info(`[${accountId}] Routing as 1:1 DM (no group context detected)`);
+        try {
+            await dispatchToAgent(bridge, accountId, peerNostrPubkey, senderLabel, displayText, msg.event_id, runtime, ctx, mediaPath);
+            ctx.log?.info(`[${accountId}] dispatchToAgent completed`);
+        }
+        catch (dispatchErr) {
+            ctx.log?.error(`[${accountId}] dispatchToAgent FAILED: ${dispatchErr}`);
+            console.error(`[keychat] dispatchToAgent error:`, dispatchErr);
+        }
+    }
+}
+/** Shared helper: dispatch a message through the agent pipeline. */
+async function dispatchToAgent(bridge, accountId, peerNostrPubkey, peerName, displayText, eventId, runtime, ctx, mediaPath) {
+    const core = runtime;
+    const cfg = core.config.loadConfig();
+    const route = core.channel.routing.resolveAgentRoute({
+        cfg,
+        channel: "keychat",
+        accountId,
+        peer: {
+            kind: "direct",
+            id: peerNostrPubkey,
+        },
+    });
+    const senderLabel = peerName || peerNostrPubkey.slice(0, 12);
+    const body = core.channel.reply.formatAgentEnvelope({
+        channel: "Keychat",
+        from: senderLabel,
+        timestamp: Date.now(),
+        body: displayText,
+    });
+    const ctxPayload = core.channel.reply.finalizeInboundContext({
+        Body: body,
+        RawBody: displayText,
+        CommandBody: displayText,
+        CommandAuthorized: true,
+        From: `keychat:${peerNostrPubkey}`,
+        To: `keychat:${accountId}`,
+        SessionKey: route.sessionKey,
+        AccountId: accountId,
+        ChatType: "direct",
+        SenderName: senderLabel,
+        SenderId: peerNostrPubkey,
+        Provider: "keychat",
+        Surface: "keychat",
+        MessageSid: eventId,
+        OriginatingChannel: "keychat",
+        OriginatingTo: `keychat:${peerNostrPubkey}`,
+        ...(mediaPath ? { MediaPath: mediaPath } : {}),
+    });
+    const tableMode = core.channel.text.resolveMarkdownTableMode({
+        cfg,
+        channel: "keychat",
+        accountId,
+    });
+    const { onModelSelected, ...prefixOptions } = createReplyPrefixOptions({
+        cfg,
+        agentId: route.agentId,
+        channel: "keychat",
+        accountId,
+    });
+    const peerPubkey = peerNostrPubkey;
+    // Buffer multiple deliver() calls and merge them into a single Keychat message.
+    // The dispatcher may call deliver() multiple times for tool-call narration, thinking
+    // leakage, or chunked streaming — we batch them to avoid message spam.
+    let deliverBuffer = [];
+    let deliverTimer = null;
+    const DELIVER_DEBOUNCE_MS = 1500;
+    const flushDeliverBuffer = async () => {
+        deliverTimer = null;
+        if (deliverBuffer.length === 0)
+            return;
+        const merged = deliverBuffer.join("\n\n").trim();
+        deliverBuffer = [];
+        if (!merged)
+            return;
+        try {
+            const result = await retrySend(() => bridge.sendMessage(peerPubkey, merged));
+            await handleReceivingAddressRotation(bridge, accountId, result, peerPubkey);
+        }
+        catch (err) {
+            ctx.log?.error(`[${accountId}] Reply delivery failed: ${err}`);
+        }
+    };
+    await core.channel.reply.dispatchReplyWithBufferedBlockDispatcher({
+        ctx: ctxPayload,
+        cfg,
+        dispatcherOptions: {
+            ...prefixOptions,
+            deliver: async (payload) => {
+                if (!payload.text)
+                    return;
+                const message = stripReasoningPrefix(core.channel.text.convertMarkdownTables(payload.text, tableMode));
+                deliverBuffer.push(message);
+                // Reset debounce timer — wait for more chunks before sending
+                if (deliverTimer)
+                    clearTimeout(deliverTimer);
+                deliverTimer = setTimeout(() => { flushDeliverBuffer(); }, DELIVER_DEBOUNCE_MS);
+            },
+            onError: (err) => {
+                ctx.log?.error(`[${accountId}] Reply delivery failed: ${err}`);
+            },
+        },
+        replyOptions: {
+            onModelSelected,
+        },
+    });
+    // Flush any remaining buffered text after dispatcher completes
+    if (deliverTimer)
+        clearTimeout(deliverTimer);
+    await flushDeliverBuffer();
+}
+/** Shared helper: dispatch a GROUP message through the agent pipeline. */
+async function dispatchGroupToAgent(bridge, accountId, groupId, peerNostrPubkey, peerName, displayText, eventId, runtime, ctx, groupMessage, mediaPath) {
+    const core = runtime;
+    const cfg = core.config.loadConfig();
+    // Use group-specific session key
+    const route = core.channel.routing.resolveAgentRoute({
+        cfg,
+        channel: "keychat",
+        accountId,
+        peer: {
+            kind: "group",
+            id: groupId,
+        },
+    });
+    const senderLabel = peerName || peerNostrPubkey.slice(0, 12);
+    // Get group info for context
+    let groupName = groupId.slice(0, 12);
+    try {
+        const groupInfo = await bridge.getGroup(groupId);
+        if (groupInfo.name)
+            groupName = groupInfo.name;
+    }
+    catch { /* best effort */ }
+    const body = core.channel.reply.formatAgentEnvelope({
+        channel: "Keychat",
+        from: senderLabel,
+        timestamp: Date.now(),
+        body: displayText,
+    });
+    const ctxPayload = core.channel.reply.finalizeInboundContext({
+        Body: body,
+        RawBody: displayText,
+        CommandBody: displayText,
+        CommandAuthorized: true,
+        From: `keychat:${peerNostrPubkey}`,
+        To: `keychat:group:${groupId}`,
+        SessionKey: route.sessionKey,
+        AccountId: accountId,
+        ChatType: "group",
+        SenderName: senderLabel,
+        SenderId: peerNostrPubkey,
+        GroupId: groupId,
+        GroupName: groupName,
+        Provider: "keychat",
+        Surface: "keychat",
+        MessageSid: eventId,
+        OriginatingChannel: "keychat",
+        OriginatingTo: `keychat:group:${groupId}`,
+        ...(mediaPath ? { MediaPath: mediaPath } : {}),
+    });
+    const tableMode = core.channel.text.resolveMarkdownTableMode({
+        cfg,
+        channel: "keychat",
+        accountId,
+    });
+    const { onModelSelected, ...prefixOptions } = createReplyPrefixOptions({
+        cfg,
+        agentId: route.agentId,
+        channel: "keychat",
+        accountId,
+    });
+    // Buffer and merge deliver() calls
+    let deliverBuffer = [];
+    let deliverTimer = null;
+    const DELIVER_DEBOUNCE_MS = 1500;
+    const flushDeliverBuffer = async () => {
+        deliverTimer = null;
+        if (deliverBuffer.length === 0)
+            return;
+        const merged = deliverBuffer.join("\n\n").trim();
+        deliverBuffer = [];
+        if (!merged)
+            return;
+        try {
+            // Send reply to the GROUP, not individual peer
+            const groupResult = await retrySend(() => bridge.sendGroupMessage(groupId, merged));
+            // Handle receiving address rotation for each group member
+            if (groupResult.member_rotations?.length) {
+                for (const rot of groupResult.member_rotations) {
+                    await handleReceivingAddressRotation(bridge, accountId, { my_new_inbox: rot.my_new_inbox }, rot.member);
+                }
+            }
+        }
+        catch (err) {
+            ctx.log?.error(`[${accountId}] Group reply delivery failed: ${err}`);
+        }
+    };
+    await core.channel.reply.dispatchReplyWithBufferedBlockDispatcher({
+        ctx: ctxPayload,
+        cfg,
+        dispatcherOptions: {
+            ...prefixOptions,
+            deliver: async (payload) => {
+                if (!payload.text)
+                    return;
+                const message = stripReasoningPrefix(core.channel.text.convertMarkdownTables(payload.text, tableMode));
+                deliverBuffer.push(message);
+                if (deliverTimer)
+                    clearTimeout(deliverTimer);
+                deliverTimer = setTimeout(() => { flushDeliverBuffer(); }, DELIVER_DEBOUNCE_MS);
+            },
+            onError: (err) => {
+                ctx.log?.error(`[${accountId}] Group reply delivery failed: ${err}`);
+            },
+        },
+        replyOptions: {
+            onModelSelected,
+        },
+    });
+    // Flush remaining
+    if (deliverTimer)
+        clearTimeout(deliverTimer);
+    await flushDeliverBuffer();
+}
+/** Subscribe + persist my receiving addresses derived from ratchet updates. */
+async function registerMyReceivingAddresses(bridge, accountId, peerNostrPubkey, addresses) {
+    const unique = Array.from(new Set(addresses.filter(Boolean)));
+    const newAddrs = unique.filter((a) => !getAddressToPeer(accountId).has(a));
+    if (newAddrs.length === 0)
+        return 0;
+    await bridge.addSubscription(newAddrs);
+    const peerAddrs = getPeerSubscribedAddresses(accountId).get(peerNostrPubkey) ?? [];
+    for (const addr of newAddrs) {
+        getAddressToPeer(accountId).set(addr, peerNostrPubkey);
+        peerAddrs.push(addr);
+        try {
+            await bridge.saveReceivingAddress(addr, peerNostrPubkey);
+        }
+        catch { /* best effort */ }
+    }
+    getPeerSubscribedAddresses(accountId).set(peerNostrPubkey, peerAddrs);
+    return newAddrs.length;
+}
+/** After each send or decrypt, rotate receiving addresses if a new one was generated. */
+async function handleReceivingAddressRotation(bridge, accountId, sendResult, peerKey) {
+    if (!sendResult.my_new_inbox)
+        return;
+    const { address } = await bridge.computeAddress(sendResult.my_new_inbox);
+    if (!peerKey) {
+        console.warn(`[keychat] handleReceivingAddressRotation: peerKey is falsy, skipping DB save for ${address.slice(0, 16)}`);
+        return;
+    }
+    await registerMyReceivingAddresses(bridge, accountId, peerKey, [address]);
+}
+/**
+ * Perform an MLS self-update (key rotation) for the given group.
+ * This generates a new epoch, rotates the listen key, and re-publishes the KeyPackage.
+ */
+export async function updateGroupKey(groupId, accountId = DEFAULT_ACCOUNT_ID) {
+    const bridge = activeBridges.get(accountId);
+    if (!bridge)
+        throw new Error(`No bridge for account ${accountId}`);
+    const log = (...args) => console.log(`[keychat:${accountId}] MLS key rotation:`, ...args);
+    // 1. Get current listen key
+    const { listen_key: oldKey } = await bridge.mlsGetListenKey(groupId);
+    // 2. Generate self-update commit
+    const displayName = resolveDisplayName(undefined, accountId, undefined);
+    const result = await bridge.mlsSelfUpdate(groupId, { name: displayName });
+    // 3. Publish commit to the OLD listen key
+    await bridge.mlsPublishToGroup(oldKey, result.encrypted_msg);
+    // 4. Merge pending commit locally
+    await bridge.mlsSelfCommit(groupId);
+    // 5. Get new listen key
+    const { listen_key: newKey } = await bridge.mlsGetListenKey(groupId);
+    // 6. Update subscriptions if key changed
+    if (newKey !== oldKey) {
+        mlsListenKeyToGroup.delete(oldKey);
+        mlsListenKeyToGroup.set(newKey, groupId);
+        await bridge.removeSubscription([oldKey]);
+        await bridge.addSubscription([newKey]);
+        log(`listen key rotated: ${oldKey.slice(0, 12)}... → ${newKey.slice(0, 12)}...`);
+    }
+    else {
+        log(`completed (key unchanged)`);
+    }
+    // 7. Re-publish KeyPackage
+    try {
+        await bridge.mlsPublishKeyPackage();
+    }
+    catch (err) {
+        log(`warning: failed to re-publish KeyPackage: ${err}`);
+    }
+}
+/**
+ * Get the agent's Keychat ID info for display/pairing.
+ */
+export function getAgentKeychatId(accountId = DEFAULT_ACCOUNT_ID) {
+    return accountInfoCache.get(accountId);
+}
+/**
+ * Generate a Keychat add-contact URL for the agent.
+ * Users can open this URL or scan the QR code with Keychat app.
+ */
+export function getAgentKeychatUrl(accountId = DEFAULT_ACCOUNT_ID) {
+    const info = accountInfoCache.get(accountId);
+    if (!info)
+        return null;
+    return `https://www.keychat.io/u/?k=${info.pubkey_npub}`;
+}
+/**
+ * Get the agent's contact info for pairing/sharing.
+ * Returns npub, contact URL, and QR code path if available.
+ */
+export function getContactInfo(accountId = DEFAULT_ACCOUNT_ID) {
+    const info = accountInfoCache.get(accountId);
+    if (!info)
+        return null;
+    return {
+        npub: info.pubkey_npub,
+        contactUrl: `https://www.keychat.io/u/?k=${info.pubkey_npub}`,
+        qrCodePath: qrCodePath(accountId),
+    };
+}
+/**
+ * Get contact info for ALL active Keychat accounts/agents.
+ * Returns an array of { accountId, npub, contactUrl, qrCodePath, name }.
+ */
+export function getAllAgentContacts() {
+    const results = [];
+    for (const [accountId, info] of accountInfoCache.entries()) {
+        results.push({
+            accountId,
+            npub: info.pubkey_npub,
+            contactUrl: `https://www.keychat.io/u/?k=${info.pubkey_npub}`,
+            qrCodePath: qrCodePath(accountId),
+        });
+    }
+    return results;
+}
+/**
+ * Reset the Signal session with a peer and optionally re-send hello.
+ * Equivalent to "Reset Signal Session" in the Keychat app.
+ *
+ * @param peerPubkey - Nostr pubkey (hex or npub) of the peer
+ * @param accountId - Account to reset session for
+ * @param resendHello - Whether to send a new hello after reset (default: true)
+ */
+export async function resetPeerSession(peerPubkey, accountId = DEFAULT_ACCOUNT_ID, resendHello = true) {
+    const normalizedPeer = normalizePubkey(peerPubkey);
+    const bridge = activeBridges.get(accountId);
+    if (!bridge) {
+        return { reset: false, error: `No active bridge for account ${accountId}` };
+    }
+    // 1. Find the peer's signal pubkey
+    const peerInfo = getPeerSessions(accountId).get(normalizedPeer);
+    const signalPubkey = peerInfo?.signalPubkey;
+    // 2. Delete Signal session via bridge RPC
+    if (signalPubkey) {
+        try {
+            await bridge.deleteSession(signalPubkey);
+            console.log(`[keychat] [${accountId}] Deleted Signal session for ${normalizedPeer} (signal: ${signalPubkey})`);
+        }
+        catch (err) {
+            console.error(`[keychat] [${accountId}] Failed to delete Signal session: ${err}`);
+        }
+    }
+    // 2b. Delete peer_mapping DB row so it doesn't resurrect on restart
+    try {
+        await bridge.deletePeerMapping(normalizedPeer);
+        console.log(`[keychat] [${accountId}] Deleted peer_mapping for ${normalizedPeer}`);
+    }
+    catch (err) {
+        console.error(`[keychat] [${accountId}] Failed to delete peer_mapping: ${err}`);
+    }
+    // 3. Clear in-memory maps
+    getPeerSessions(accountId).delete(normalizedPeer);
+    // Clear address mappings pointing to this peer
+    const addrMap = getAddressToPeer(accountId);
+    for (const [addr, peer] of addrMap) {
+        if (peer === normalizedPeer) {
+            addrMap.delete(addr);
+            try {
+                await bridge.deleteReceivingAddress(addr);
+            }
+            catch { /* best effort */ }
+        }
+    }
+    // Reset friend-request state machine for this peer.
+    friendRequestManager.resetPeer(accountId, normalizedPeer);
+    try {
+        await bridge.deletePendingHelloMessages(normalizedPeer);
+    }
+    catch { /* best effort */ }
+    getPeerSubscribedAddresses(accountId).delete(normalizedPeer);
+    console.log(`[keychat] [${accountId}] Session reset for peer ${normalizedPeer}`);
+    // 4. Optionally re-send hello
+    if (resendHello) {
+        try {
+            const resetCfg = getKeychatRuntime().config.loadConfig();
+            const name = resolveDisplayName(resetCfg, accountId);
+            await friendRequestManager.ensureOutgoingHelloAndHandshakeSubscriptions(bridge, accountId, normalizedPeer, name);
+            console.log(`[keychat] [${accountId}] Hello re-sent to ${normalizedPeer}`);
+            return { reset: true, helloSent: true };
+        }
+        catch (err) {
+            console.error(`[keychat] [${accountId}] Failed to re-send hello: ${err}`);
+            return { reset: true, helloSent: false, error: `Reset OK but hello failed: ${err}` };
+        }
+    }
+    return { reset: true };
+}

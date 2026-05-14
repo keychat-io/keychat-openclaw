@@ -1,38 +1,89 @@
 {
   "id": "keychat",
+  "kind": "channel",
   "channels": ["keychat"],
+  "activation": {
+    "onStartup": true,
+    "onChannels": ["keychat"],
+    "onConfigPaths": ["channels.keychat"]
+  },
   "name": "Keychat",
   "description": "Sovereign identity + E2E encrypted chat via Signal Protocol over Nostr relays. Lightning wallet support via LNURL-pay and NWC.",
-  "version": "0.1.0",
+  "version": "0.1.63",
   "repository": "https://github.com/keychat-io/keychat-openclaw",
   "license": "AGPL-3.0",
   "configSchema": {
     "type": "object",
     "additionalProperties": false,
-    "properties": {
-      "name": { "type": "string", "description": "Display name for this account" },
-      "enabled": { "type": "boolean", "description": "Enable/disable the Keychat channel" },
-      "markdown": { "type": "object", "description": "Markdown formatting overrides" },
-      "mnemonic": { "type": "string", "description": "Identity mnemonic (auto-generated, stored in keychain)" },
-      "publicKey": { "type": "string", "description": "Derived hex public key (read-only)" },
-      "npub": { "type": "string", "description": "Derived bech32 npub (read-only)" },
-      "relays": {
-        "type": "array",
-        "items": { "type": "string" },
-        "description": "Nostr relay WebSocket URLs"
-      },
-      "dmPolicy": {
-        "type": "string",
-        "enum": ["pairing", "allowlist", "open", "disabled"],
-        "description": "DM access policy"
-      },
-      "allowFrom": {
-        "type": "array",
-        "items": { "type": ["string", "number"] },
-        "description": "Allowed sender pubkeys (npub or hex)"
-      },
-      "lightningAddress": { "type": "string", "description": "Lightning address for receiving payments" },
-      "nwcUri": { "type": "string", "description": "Nostr Wallet Connect URI" }
+    "properties": {}
+  },
+  "channelConfigs": {
+    "keychat": {
+      "schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "name": { "type": "string", "description": "Display name for this account" },
+          "enabled": { "type": "boolean", "description": "Enable/disable the Keychat channel" },
+          "markdown": { "type": "object", "description": "Markdown formatting overrides" },
+          "mnemonic": { "type": "string", "description": "Identity mnemonic (legacy migration only; stored in keychain)" },
+          "publicKey": { "type": "string", "description": "Derived hex public key (read-only)" },
+          "npub": { "type": "string", "description": "Derived bech32 npub (read-only)" },
+          "relays": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "Nostr relay WebSocket URLs"
+          },
+          "dmPolicy": {
+            "type": "string",
+            "enum": ["pairing", "allowlist", "open", "disabled"],
+            "default": "pairing",
+            "description": "DM access policy"
+          },
+          "allowFrom": {
+            "type": "array",
+            "items": { "type": ["string", "number"] },
+            "description": "Allowed sender pubkeys (npub or hex)"
+          },
+          "owner": { "type": "string", "description": "Owner pubkey for approving pending contacts" },
+          "lightningAddress": { "type": "string", "description": "Lightning address for receiving payments" },
+          "nwcUri": { "type": "string", "description": "Nostr Wallet Connect URI" },
+          "mediaServer": { "type": "string", "description": "Blossom media server URL for encrypted file upload/download" },
+          "accounts": {
+            "type": "object",
+            "propertyNames": { "type": "string" },
+            "additionalProperties": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "name": { "type": "string" },
+                "enabled": { "type": "boolean" },
+                "markdown": { "type": "object" },
+                "mnemonic": { "type": "string" },
+                "publicKey": { "type": "string" },
+                "npub": { "type": "string" },
+                "relays": {
+                  "type": "array",
+                  "items": { "type": "string" }
+                },
+                "dmPolicy": {
+                  "type": "string",
+                  "enum": ["pairing", "allowlist", "open", "disabled"],
+                  "default": "pairing"
+                },
+                "allowFrom": {
+                  "type": "array",
+                  "items": { "type": ["string", "number"] }
+                },
+                "owner": { "type": "string" },
+                "lightningAddress": { "type": "string" },
+                "nwcUri": { "type": "string" },
+                "mediaServer": { "type": "string" }
+              }
+            }
+          }
+        }
+      }
     }
   }
 }

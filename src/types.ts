@@ -16,6 +16,8 @@ export interface KeychatAccountConfig {
   dmPolicy?: "pairing" | "allowlist" | "open" | "disabled";
   /** Allowed sender pubkeys */
   allowFrom?: Array<string | number>;
+  /** Owner pubkey used for approving pending contacts */
+  owner?: string;
   /** Lightning address for receiving payments */
   lightningAddress?: string;
   /** Nostr Wallet Connect URI */
@@ -126,6 +128,7 @@ export function resolveKeychatAccount(opts: {
       relays: acctCfg?.relays,
       dmPolicy: acctCfg?.dmPolicy,
       allowFrom: acctCfg?.allowFrom,
+      owner: acctCfg?.owner,
       lightningAddress: acctCfg?.lightningAddress,
       nwcUri: acctCfg?.nwcUri,
       mediaServer: acctCfg?.mediaServer,
